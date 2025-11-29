@@ -1,0 +1,57 @@
+# Example: Docker Compose Application
+# For apps that use Docker Compose for local development
+
+name: Quent AI Tests
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  quent-test:
+    if: contains(github.event.pull_request.labels.*.name, 'quent')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Start Docker Compose
+        run: |
+          docker-compose up -d
+          docker-compose logs -f &
+
+      - name: Wait for Services
+        run: |
+          npx wait-on http://localhost:3000 --timeout 120000
+          npx wait-on tcp:localhost:5432 --timeout 60000
+
+      - name: Run Database Migrations
+        run: docker-compose exec -T app npm run db:migrate
+
+      - name: Seed Test Data
+        run: docker-compose exec -T app npm run db:seed
+
+      - name: Run Quent Tests
+        uses: quent-ai/quent-action@v1
+        with:
+          quent-api-key: ${{ secrets.QUENT_API_KEY }}
+          project-id: ${{ secrets.QUENT_PROJECT_ID }}
+          base-url: 'http://localhost:3000'
+          # No start-command needed - app is already running in Docker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Stop Docker Compose
+        if: always()
+        run: docker-compose down -v
+

@@ -1,0 +1,57 @@
+name: 'Quent AI Tests'
+description: 'Run Quent AI-generated Playwright tests on your pull requests'
+author: 'Quent AI'
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  quent-api-key:
+    description: 'Your Quent API key'
+    required: true
+  project-id:
+    description: 'Your Quent project ID'
+    required: true
+  base-url:
+    description: 'Base URL of your application to test'
+    required: true
+  start-command:
+    description: 'Command to start your application (optional if app is already running)'
+    required: false
+    default: ''
+  wait-on-url:
+    description: 'URL to wait for before running tests (defaults to base-url)'
+    required: false
+    default: ''
+  wait-on-timeout:
+    description: 'Timeout in seconds to wait for the app to start'
+    required: false
+    default: '120'
+  quent-api-url:
+    description: 'Quent API URL (optional, for self-hosted)'
+    required: false
+    default: 'https://api.quent.ai'
+  decision-timeout:
+    description: 'Timeout in seconds to wait for user decision on failures'
+    required: false
+    default: '3600'
+  browser:
+    description: 'Browser to use for testing (chromium, firefox, webkit)'
+    required: false
+    default: 'chromium'
+
+outputs:
+  status:
+    description: 'Test run status (passed, failed, pending_decision)'
+  report-url:
+    description: 'URL to view the test report'
+  failed-tests:
+    description: 'Number of failed tests'
+  passed-tests:
+    description: 'Number of passed tests'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+  post: 'dist/cleanup.js'
+

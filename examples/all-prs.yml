@@ -1,0 +1,48 @@
+# Example: Run on All PRs (No Label Required)
+# Use this if you want Quent tests to run on every PR automatically
+
+name: Quent AI Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # Optionally filter by paths
+    paths:
+      - 'src/**'
+      - 'components/**'
+      - 'pages/**'
+      - 'package.json'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  quent-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Quent Tests
+        uses: quent-ai/quent-action@v1
+        with:
+          quent-api-key: ${{ secrets.QUENT_API_KEY }}
+          project-id: ${{ secrets.QUENT_PROJECT_ID }}
+          base-url: 'http://localhost:3000'
+          start-command: 'npm run start'
+          # Shorter decision timeout for automatic runs
+          decision-timeout: '1800'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
