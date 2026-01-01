@@ -30,7 +30,7 @@ inputs:
   quent-api-url:
     description: 'Quent API URL (optional, for self-hosted)'
     required: false
-    default: 'https://api.quent.ai'
+    default: 'https://quent-service.vercel.app'
   decision-timeout:
     description: 'Timeout in seconds to wait for user decision on failures'
     required: false

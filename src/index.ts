@@ -19,7 +19,7 @@ async function run(): Promise<void> {
     const startCommand = core.getInput('start-command');
     const waitOnUrl = core.getInput('wait-on-url') || baseUrl;
     const waitOnTimeout = parseInt(core.getInput('wait-on-timeout') || '120', 10);
-    const quentApiUrl = core.getInput('quent-api-url') || 'https://api.quent.ai';
+    const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
     const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
     const browser = core.getInput('browser') || 'chromium';
 

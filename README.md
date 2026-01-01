@@ -73,7 +73,7 @@ That's it! When you add the `quent` label to a PR, Quent will automatically run 
 | `start-command` | Command to start your app (optional) | No | - |
 | `wait-on-url` | URL to wait for before testing | No | `base-url` |
 | `wait-on-timeout` | Timeout for app startup (seconds) | No | `120` |
-| `quent-api-url` | Quent API URL (for self-hosted) | No | `https://api.quent.ai` |
+| `quent-api-url` | Quent API URL (for self-hosted) | No | `https://quent-service.vercel.app` |
 | `decision-timeout` | Timeout for user decision (seconds) | No | `3600` |
 | `browser` | Browser to use (chromium/firefox/webkit) | No | `chromium` |
 
