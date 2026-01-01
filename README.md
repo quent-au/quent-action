@@ -251,12 +251,13 @@ env:
 
 ## Support
 
-- 📚 [Documentation](https://docs.quent.ai)
+<!-- - 📚 [Documentation](https://docs.quent.ai)
 - 💬 [Discord Community](https://discord.gg/quent)
 - 📧 [Email Support](mailto:support@quent.ai)
-- 🐛 [Report Issues](https://github.com/quent-ai/quent-action/issues)
+- 🐛 [Report Issues](https://github.com/quent-ai/quent-action/issues) -->
 
 ## License
 
 MIT © [Quent AI](https://quent.ai)
+
 
