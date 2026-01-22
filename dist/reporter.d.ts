@@ -41,13 +41,16 @@ interface CreateReportParams {
     testsDir: string;
 }
 interface ReportResult {
-    analysisId: string;
+    analysisId?: string;
+    testRunId?: string;
     diffUrl: string;
 }
 export declare class FailureReporter {
     private api;
     constructor(api: QuentiApi);
     createReport(params: CreateReportParams): Promise<ReportResult>;
+    private prepareTestResults;
+    private prepareSteps;
     private collectTraceFiles;
 }
 export {};

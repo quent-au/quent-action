@@ -28,6 +28,25 @@ interface RunResults {
   failures: TestFailure[];
 }
 
+// Prepared test result with base64 screenshots (for API)
+interface PreparedTestResult {
+  testId: string;
+  testName: string;
+  status: string;
+  duration: number;
+  retryCount: number;
+  error?: { message: string; stack: string };
+  steps: PreparedStep[];
+}
+
+interface PreparedStep {
+  stepIndex: number;
+  stepName: string;
+  screenshot: string; // base64
+  consoleMessages: Array<{ type: string; text: string; timestamp: number }>;
+  networkErrors: Array<{ url: string; status: number; statusText: string; method: string }>;
+}
+
 interface CreateReportParams {
   projectId: string;
   prNumber: number;
@@ -40,7 +59,8 @@ interface CreateReportParams {
 }
 
 interface ReportResult {
-  analysisId: string;
+  analysisId?: string;
+  testRunId?: string;
   diffUrl: string;
 }
 
@@ -54,71 +74,97 @@ export class FailureReporter {
   async createReport(params: CreateReportParams): Promise<ReportResult> {
     const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
 
-    core.info(`Creating failure report for ${results.failures.length} failed tests`);
+    core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
 
-    // Convert screenshots to base64 and prepare report
-    const tests = await Promise.all(
-      results.failures.map(async (failure) => {
-        const steps = await Promise.all(
-          failure.steps.map(async (step) => {
-            let screenshotBase64 = '';
+    // Convert screenshots to base64 and prepare ALL tests (passed + failed)
+    const tests = await this.prepareTestResults(results);
 
-            if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
-              try {
-                const buffer = fs.readFileSync(step.screenshotPath);
-                screenshotBase64 = buffer.toString('base64');
-              } catch (error) {
-                core.warning(`Failed to read screenshot: ${step.screenshotPath}`);
-              }
-            }
-
-            return {
-              stepIndex: step.stepIndex,
-              stepName: step.stepName,
-              screenshot: screenshotBase64,
-              consoleMessages: step.consoleMessages,
-              networkErrors: step.networkErrors,
-            };
-          })
-        );
-
-        return {
-          testId: failure.testId,
-          testName: failure.testName,
-          status: 'failed',
-          duration: failure.duration,
-          error: {
-            message: failure.error,
-            stack: failure.stack,
-          },
-          steps,
-          retryCount: 1,
-        };
-      })
-    );
-
-    // Also try to collect trace files
-    const traceFiles = await this.collectTraceFiles(testsDir);
-    
-    // Upload to Quent API
-    const response = await this.api.uploadFailure({
+    // Upload to Quent API via test-runs endpoint (reports ALL results)
+    const response = await this.api.uploadTestRun({
       projectId,
       prNumber,
       branch,
       repo,
       sha,
       runId,
-      report: {
-        status: results.status,
-        duration: results.duration,
-        tests,
-      },
+      triggerType: 'CI_PR',
+      tests,
     });
 
+    // If there are failures, also create an analysis for review
+    let analysisId: string | undefined;
+    if (results.failed > 0) {
+      const failedTests = tests.filter(t => t.status === 'failed');
+      const analysisResponse = await this.api.uploadFailure({
+        projectId,
+        prNumber,
+        branch,
+        repo,
+        sha,
+        runId,
+        report: {
+          status: results.status,
+          duration: results.duration,
+          tests: failedTests,
+        },
+      });
+      analysisId = analysisResponse.analysisId;
+    }
+
     return {
-      analysisId: response.analysisId,
-      diffUrl: response.diffUrl,
+      testRunId: response.testRunId,
+      analysisId,
+      diffUrl: response.diffUrl || (analysisId ? `https://app.quent.ai/analysis/${analysisId}` : `https://app.quent.ai/test-run/${response.testRunId}`),
     };
+  }
+
+  private async prepareTestResults(results: RunResults): Promise<PreparedTestResult[]> {
+    // Construct from failures
+    const failedTests = await Promise.all(
+      results.failures.map(async (failure) => {
+        const steps = await this.prepareSteps(failure.steps);
+
+        return {
+          testId: failure.testId,
+          testName: failure.testName,
+          status: 'failed',
+          duration: failure.duration,
+          retryCount: 1,
+          error: {
+            message: failure.error,
+            stack: failure.stack,
+          },
+          steps,
+        };
+      })
+    );
+
+    return failedTests;
+  }
+
+  private async prepareSteps(steps: StepCapture[]): Promise<PreparedStep[]> {
+    return Promise.all(
+      steps.map(async (step) => {
+        let screenshotBase64 = '';
+
+        if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
+          try {
+            const buffer = fs.readFileSync(step.screenshotPath);
+            screenshotBase64 = buffer.toString('base64');
+          } catch (error) {
+            core.warning(`Failed to read screenshot: ${step.screenshotPath}`);
+          }
+        }
+
+        return {
+          stepIndex: step.stepIndex,
+          stepName: step.stepName,
+          screenshot: screenshotBase64,
+          consoleMessages: step.consoleMessages || [],
+          networkErrors: step.networkErrors || [],
+        };
+      })
+    );
   }
 
   private async collectTraceFiles(testsDir: string): Promise<string[]> {
@@ -151,5 +197,6 @@ export class FailureReporter {
     return traces;
   }
 }
+
 
 

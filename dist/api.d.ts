@@ -61,6 +61,29 @@ export declare class QuentiApi {
     private fetch;
     downloadTests(params: DownloadTestsParams): Promise<void>;
     uploadFailure(params: UploadFailureParams): Promise<UploadFailureResponse>;
+    uploadTestRun(params: {
+        projectId: string;
+        prNumber?: number;
+        branch: string;
+        repo: string;
+        sha: string;
+        runId: string;
+        triggerType: string;
+        tests: Array<{
+            testId: string;
+            testName: string;
+            status: string;
+            duration: number;
+            error?: {
+                message: string;
+                stack: string;
+            };
+            steps: any[];
+        }>;
+    }): Promise<{
+        testRunId: string;
+        diffUrl: string;
+    }>;
     waitForDecision(params: {
         analysisId: string;
         timeout: number;

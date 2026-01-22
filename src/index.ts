@@ -111,17 +111,8 @@ async function run(): Promise<void> {
     const results = await runner.run();
     core.endGroup();
 
-    // Step 5: Handle results
-    if (results.status === 'passed') {
-      core.info('✅ All tests passed!');
-      core.setOutput('status', 'passed');
-      core.setOutput('passed-tests', results.passed);
-      core.setOutput('failed-tests', 0);
-      return;
-    }
-
-    // Tests failed - report to Quent
-    core.startGroup('📤 Reporting failures to Quent');
+    // Step 5: Report ALL results to Quent (pass and fail)
+    core.startGroup('📤 Reporting results to Quent');
     const reporter = new FailureReporter(api);
     
     const report = await reporter.createReport({
@@ -135,9 +126,10 @@ async function run(): Promise<void> {
       testsDir,
     });
 
-    core.info(`📊 Failure report created: ${report.analysisId}`);
-    core.info(`🔗 View diff: ${report.diffUrl}`);
+    core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
+    core.info(`🔗 View results: ${report.diffUrl}`);
     core.setOutput('report-url', report.diffUrl);
+    core.setOutput('test-run-id', report.testRunId);
     core.endGroup();
 
     // Step 6: Post PR comment (if PR)
@@ -150,7 +142,7 @@ async function run(): Promise<void> {
           owner: context.repo.owner,
           repo: context.repo.repo,
           issue_number: prNumber,
-          body: createPRComment(results, report.diffUrl, report.analysisId),
+          body: createPRComment(results, report.diffUrl, report.analysisId || report.testRunId || '', context.runId.toString()),
         });
         core.info('✅ PR comment posted');
       } else {
@@ -159,7 +151,22 @@ async function run(): Promise<void> {
       core.endGroup();
     }
 
-    // Step 7: Wait for user decision
+    // If all tests passed, we're done (no need to wait for decision)
+    if (results.status === 'passed') {
+      core.info('✅ All tests passed!');
+      core.setOutput('status', 'passed');
+      core.setOutput('passed-tests', results.passed);
+      core.setOutput('failed-tests', 0);
+      return;
+    }
+
+    // Step 7: Wait for user decision (only if tests failed and we have an analysisId)
+    if (!report.analysisId) {
+      core.warning('No analysis created - skipping decision wait');
+      core.setFailed(`❌ ${results.failed} tests failed`);
+      return;
+    }
+
     core.startGroup('⏳ Waiting for user decision');
     core.info(`Waiting up to ${decisionTimeout} seconds for decision...`);
     
@@ -227,7 +234,8 @@ async function run(): Promise<void> {
 function createPRComment(
   results: { failed: number; passed: number; failures: Array<{ testName: string; error: string }> },
   diffUrl: string,
-  analysisId: string
+  analysisId: string,
+  runId?: string
 ): string {
   const failureList = results.failures
     .slice(0, 5) // Show max 5 failures in comment
@@ -237,6 +245,15 @@ function createPRComment(
   const moreFailures = results.failures.length > 5 
     ? `\n\n*...and ${results.failures.length - 5} more failures*` 
     : '';
+
+  // Deep links for Electron app (quent:// protocol)
+  const electronAnalysisLink = `quent://analysis/${analysisId}`;
+  const electronRunLink = runId ? `quent://test-run/${runId}` : null;
+
+  // Web links for browser viewing
+  const webAnalysisLink = `https://app.quent.ai/analysis/${analysisId}`;
+  const acceptLink = `${webAnalysisLink}?action=accept`;
+  const rejectLink = `${webAnalysisLink}?action=reject`;
 
   return `## 🔍 Quent AI Test Results
 
@@ -249,19 +266,28 @@ ${failureList}${moreFailures}
 
 ---
 
-### 📸 [View Screenshots & Diff](${diffUrl})
+### 📸 View Results
 
-**What would you like to do?**
+| Platform | Link |
+|----------|------|
+| 🌐 Web | [View in Browser](${diffUrl}) |
+| 💻 Desktop App | [Open in Quent App](${electronAnalysisLink}) |
+${electronRunLink ? `| 📊 Full Run Details | [View Test Run](${electronRunLink}) |\n` : ''}
 
-| Action | Link |
-|--------|------|
-| ✅ Mark as New Feature | [Update baselines & re-run](https://app.quent.ai/analysis/${analysisId}?action=accept) |
-| ❌ Confirm as Bug | [Fail this check](https://app.quent.ai/analysis/${analysisId}?action=reject) |
+### 🤔 What would you like to do?
+
+| Decision | Action |
+|----------|--------|
+| ✨ **New Feature** | [Update baselines & pass CI](${acceptLink}) |
+| 🐛 **Bug** | [Fail this check](${rejectLink}) |
+
+> 💡 **Tip:** Open in the Quent desktop app for the best experience with side-by-side screenshot comparisons and AI-powered analysis.
 
 ---
-*Powered by [Quent AI](https://quent.ai) - AI-Powered QA Testing*`;
+*Powered by [Quent AI](https://quent.ai) - AI-Powered Visual Testing*`;
 }
 
 run();
+
 
 

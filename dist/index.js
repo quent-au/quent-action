@@ -33311,6 +33311,26 @@ class QuentiApi {
         });
         return response.json();
     }
+    async uploadTestRun(params) {
+        core.info(`Uploading test run with ${params.tests.length} tests`);
+        const response = await this.fetch('/v1/test-runs', {
+            method: 'POST',
+            body: JSON.stringify({
+                projectId: params.projectId,
+                prNumber: params.prNumber,
+                branch: params.branch,
+                repo: params.repo,
+                sha: params.sha,
+                triggerType: params.triggerType,
+                tests: params.tests,
+            }),
+        });
+        const data = await response.json();
+        return {
+            testRunId: data.data.id,
+            diffUrl: data.data.deepLink || `https://app.quent.ai/test-run/${data.data.id}`,
+        };
+    }
     async waitForDecision(params) {
         const startTime = Date.now();
         const pollInterval = 10000; // 10 seconds
@@ -33411,7 +33431,7 @@ async function run() {
         const startCommand = core.getInput('start-command');
         const waitOnUrl = core.getInput('wait-on-url') || baseUrl;
         const waitOnTimeout = parseInt(core.getInput('wait-on-timeout') || '120', 10);
-        const quentApiUrl = core.getInput('quent-api-url') || 'https://api.quent.ai';
+        const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
         const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
         const browser = core.getInput('browser') || 'chromium';
         // Get GitHub context
@@ -33486,16 +33506,8 @@ async function run() {
         });
         const results = await runner.run();
         core.endGroup();
-        // Step 5: Handle results
-        if (results.status === 'passed') {
-            core.info('✅ All tests passed!');
-            core.setOutput('status', 'passed');
-            core.setOutput('passed-tests', results.passed);
-            core.setOutput('failed-tests', 0);
-            return;
-        }
-        // Tests failed - report to Quent
-        core.startGroup('📤 Reporting failures to Quent');
+        // Step 5: Report ALL results to Quent (pass and fail)
+        core.startGroup('📤 Reporting results to Quent');
         const reporter = new reporter_1.FailureReporter(api);
         const report = await reporter.createReport({
             projectId,
@@ -33507,9 +33519,10 @@ async function run() {
             results,
             testsDir,
         });
-        core.info(`📊 Failure report created: ${report.analysisId}`);
-        core.info(`🔗 View diff: ${report.diffUrl}`);
+        core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
+        core.info(`🔗 View results: ${report.diffUrl}`);
         core.setOutput('report-url', report.diffUrl);
+        core.setOutput('test-run-id', report.testRunId);
         core.endGroup();
         // Step 6: Post PR comment (if PR)
         if (prNumber) {
@@ -33521,7 +33534,7 @@ async function run() {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     issue_number: prNumber,
-                    body: createPRComment(results, report.diffUrl, report.analysisId),
+                    body: createPRComment(results, report.diffUrl, report.analysisId || report.testRunId || '', context.runId.toString()),
                 });
                 core.info('✅ PR comment posted');
             }
@@ -33530,7 +33543,20 @@ async function run() {
             }
             core.endGroup();
         }
-        // Step 7: Wait for user decision
+        // If all tests passed, we're done (no need to wait for decision)
+        if (results.status === 'passed') {
+            core.info('✅ All tests passed!');
+            core.setOutput('status', 'passed');
+            core.setOutput('passed-tests', results.passed);
+            core.setOutput('failed-tests', 0);
+            return;
+        }
+        // Step 7: Wait for user decision (only if tests failed and we have an analysisId)
+        if (!report.analysisId) {
+            core.warning('No analysis created - skipping decision wait');
+            core.setFailed(`❌ ${results.failed} tests failed`);
+            return;
+        }
         core.startGroup('⏳ Waiting for user decision');
         core.info(`Waiting up to ${decisionTimeout} seconds for decision...`);
         const decision = await api.waitForDecision({
@@ -33586,7 +33612,7 @@ async function run() {
         }
     }
 }
-function createPRComment(results, diffUrl, analysisId) {
+function createPRComment(results, diffUrl, analysisId, runId) {
     const failureList = results.failures
         .slice(0, 5) // Show max 5 failures in comment
         .map((f) => `- **${f.testName}**: ${f.error.substring(0, 100)}...`)
@@ -33594,6 +33620,13 @@ function createPRComment(results, diffUrl, analysisId) {
     const moreFailures = results.failures.length > 5
         ? `\n\n*...and ${results.failures.length - 5} more failures*`
         : '';
+    // Deep links for Electron app (quent:// protocol)
+    const electronAnalysisLink = `quent://analysis/${analysisId}`;
+    const electronRunLink = runId ? `quent://test-run/${runId}` : null;
+    // Web links for browser viewing
+    const webAnalysisLink = `https://app.quent.ai/analysis/${analysisId}`;
+    const acceptLink = `${webAnalysisLink}?action=accept`;
+    const rejectLink = `${webAnalysisLink}?action=reject`;
     return `## 🔍 Quent AI Test Results
 
 ### Summary
@@ -33605,17 +33638,25 @@ ${failureList}${moreFailures}
 
 ---
 
-### 📸 [View Screenshots & Diff](${diffUrl})
+### 📸 View Results
 
-**What would you like to do?**
+| Platform | Link |
+|----------|------|
+| 🌐 Web | [View in Browser](${diffUrl}) |
+| 💻 Desktop App | [Open in Quent App](${electronAnalysisLink}) |
+${electronRunLink ? `| 📊 Full Run Details | [View Test Run](${electronRunLink}) |\n` : ''}
 
-| Action | Link |
-|--------|------|
-| ✅ Mark as New Feature | [Update baselines & re-run](https://app.quent.ai/analysis/${analysisId}?action=accept) |
-| ❌ Confirm as Bug | [Fail this check](https://app.quent.ai/analysis/${analysisId}?action=reject) |
+### 🤔 What would you like to do?
+
+| Decision | Action |
+|----------|--------|
+| ✨ **New Feature** | [Update baselines & pass CI](${acceptLink}) |
+| 🐛 **Bug** | [Fail this check](${rejectLink}) |
+
+> 💡 **Tip:** Open in the Quent desktop app for the best experience with side-by-side screenshot comparisons and AI-powered analysis.
 
 ---
-*Powered by [Quent AI](https://quent.ai) - AI-Powered QA Testing*`;
+*Powered by [Quent AI](https://quent.ai) - AI-Powered Visual Testing*`;
 }
 run();
 
@@ -33672,61 +33713,84 @@ class FailureReporter {
     }
     async createReport(params) {
         const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
-        core.info(`Creating failure report for ${results.failures.length} failed tests`);
-        // Convert screenshots to base64 and prepare report
-        const tests = await Promise.all(results.failures.map(async (failure) => {
-            const steps = await Promise.all(failure.steps.map(async (step) => {
-                let screenshotBase64 = '';
-                if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
-                    try {
-                        const buffer = fs.readFileSync(step.screenshotPath);
-                        screenshotBase64 = buffer.toString('base64');
-                    }
-                    catch (error) {
-                        core.warning(`Failed to read screenshot: ${step.screenshotPath}`);
-                    }
-                }
-                return {
-                    stepIndex: step.stepIndex,
-                    stepName: step.stepName,
-                    screenshot: screenshotBase64,
-                    consoleMessages: step.consoleMessages,
-                    networkErrors: step.networkErrors,
-                };
-            }));
-            return {
-                testId: failure.testId,
-                testName: failure.testName,
-                status: 'failed',
-                duration: failure.duration,
-                error: {
-                    message: failure.error,
-                    stack: failure.stack,
-                },
-                steps,
-                retryCount: 1,
-            };
-        }));
-        // Also try to collect trace files
-        const traceFiles = await this.collectTraceFiles(testsDir);
-        // Upload to Quent API
-        const response = await this.api.uploadFailure({
+        core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
+        // Convert screenshots to base64 and prepare ALL tests (passed + failed)
+        const tests = await this.prepareTestResults(results);
+        // Upload to Quent API via test-runs endpoint (reports ALL results)
+        const response = await this.api.uploadTestRun({
             projectId,
             prNumber,
             branch,
             repo,
             sha,
             runId,
-            report: {
-                status: results.status,
-                duration: results.duration,
-                tests,
-            },
+            triggerType: 'CI_PR',
+            tests,
         });
+        // If there are failures, also create an analysis for review
+        let analysisId;
+        if (results.failed > 0) {
+            const failedTests = tests.filter(t => t.status === 'failed');
+            const analysisResponse = await this.api.uploadFailure({
+                projectId,
+                prNumber,
+                branch,
+                repo,
+                sha,
+                runId,
+                report: {
+                    status: results.status,
+                    duration: results.duration,
+                    tests: failedTests,
+                },
+            });
+            analysisId = analysisResponse.analysisId;
+        }
         return {
-            analysisId: response.analysisId,
-            diffUrl: response.diffUrl,
+            testRunId: response.testRunId,
+            analysisId,
+            diffUrl: response.diffUrl || (analysisId ? `https://app.quent.ai/analysis/${analysisId}` : `https://app.quent.ai/test-run/${response.testRunId}`),
         };
+    }
+    async prepareTestResults(results) {
+        // Construct from failures
+        const failedTests = await Promise.all(results.failures.map(async (failure) => {
+            const steps = await this.prepareSteps(failure.steps);
+            return {
+                testId: failure.testId,
+                testName: failure.testName,
+                status: 'failed',
+                duration: failure.duration,
+                retryCount: 1,
+                error: {
+                    message: failure.error,
+                    stack: failure.stack,
+                },
+                steps,
+            };
+        }));
+        return failedTests;
+    }
+    async prepareSteps(steps) {
+        return Promise.all(steps.map(async (step) => {
+            let screenshotBase64 = '';
+            if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
+                try {
+                    const buffer = fs.readFileSync(step.screenshotPath);
+                    screenshotBase64 = buffer.toString('base64');
+                }
+                catch (error) {
+                    core.warning(`Failed to read screenshot: ${step.screenshotPath}`);
+                }
+            }
+            return {
+                stepIndex: step.stepIndex,
+                stepName: step.stepName,
+                screenshot: screenshotBase64,
+                consoleMessages: step.consoleMessages || [],
+                networkErrors: step.networkErrors || [],
+            };
+        }));
     }
     async collectTraceFiles(testsDir) {
         const traces = [];

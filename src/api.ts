@@ -124,6 +124,46 @@ export class QuentiApi {
     return response.json() as Promise<UploadFailureResponse>;
   }
 
+  async uploadTestRun(params: {
+    projectId: string;
+    prNumber?: number;
+    branch: string;
+    repo: string;
+    sha: string;
+    runId: string;
+    triggerType: string;
+    tests: Array<{
+      testId: string;
+      testName: string;
+      status: string;
+      duration: number;
+      error?: { message: string; stack: string };
+      steps: any[];
+    }>;
+  }): Promise<{ testRunId: string; diffUrl: string }> {
+    core.info(`Uploading test run with ${params.tests.length} tests`);
+
+    const response = await this.fetch('/v1/test-runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: params.projectId,
+        prNumber: params.prNumber,
+        branch: params.branch,
+        repo: params.repo,
+        sha: params.sha,
+        triggerType: params.triggerType,
+        tests: params.tests,
+      }),
+    });
+
+    const data = await response.json() as { success: boolean; data: { id: string; runNumber: number; deepLink: string } };
+    
+    return {
+      testRunId: data.data.id,
+      diffUrl: data.data.deepLink || `https://app.quent.ai/test-run/${data.data.id}`,
+    };
+  }
+
   async waitForDecision(params: { analysisId: string; timeout: number }): Promise<DecisionResponse> {
     const startTime = Date.now();
     const pollInterval = 10000; // 10 seconds
@@ -169,5 +209,6 @@ export class QuentiApi {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
 
 
