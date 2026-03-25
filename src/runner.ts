@@ -8,6 +8,8 @@ interface RunnerOptions {
   baseUrl: string;
   browser: string;
   retries: number;
+  apiKey: string;
+  apiUrl?: string;
 }
 
 interface TestFailure {
@@ -77,6 +79,8 @@ export class TestRunner {
           env: {
             ...process.env,
             BASE_URL: baseUrl,
+            QUENT_API_KEY: this.options.apiKey,
+            QUENT_API_URL: this.options.apiUrl || 'https://quent-service.vercel.app',
             PWTEST_SKIP_TEST_OUTPUT: '1',
           },
           ignoreReturnCode: true,

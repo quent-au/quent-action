@@ -3,6 +3,8 @@ interface RunnerOptions {
     baseUrl: string;
     browser: string;
     retries: number;
+    apiKey: string;
+    apiUrl?: string;
 }
 interface TestFailure {
     testId: string;

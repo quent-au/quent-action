@@ -106,6 +106,8 @@ async function run(): Promise<void> {
       baseUrl,
       browser,
       retries: 1,
+      apiKey,
+      apiUrl: quentApiUrl,
     });
 
     const results = await runner.run();

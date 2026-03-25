@@ -33503,6 +33503,8 @@ async function run() {
             baseUrl,
             browser,
             retries: 1,
+            apiKey,
+            apiUrl: quentApiUrl,
         });
         const results = await runner.run();
         core.endGroup();
@@ -33901,6 +33903,8 @@ class TestRunner {
                 env: {
                     ...process.env,
                     BASE_URL: baseUrl,
+                    QUENT_API_KEY: this.options.apiKey,
+                    QUENT_API_URL: this.options.apiUrl || 'https://quent-service.vercel.app',
                     PWTEST_SKIP_TEST_OUTPUT: '1',
                 },
                 ignoreReturnCode: true,
