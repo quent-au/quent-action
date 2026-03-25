@@ -33884,7 +33884,7 @@ class TestRunner {
         // Install dependencies
         const packageJsonPath = path.join(testsDir, 'package.json');
         if (fs.existsSync(packageJsonPath)) {
-            await exec.exec('npm', ['ci'], { cwd: testsDir });
+            await exec.exec('npm', ['install', '--no-audit', '--no-fund'], { cwd: testsDir });
         }
         // Run playwright tests
         let exitCode = 0;
