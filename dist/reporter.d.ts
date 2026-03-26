@@ -28,6 +28,7 @@ interface TestInfo {
     testName: string;
     status: 'passed' | 'failed' | 'skipped' | 'flaky';
     duration: number;
+    steps: StepCapture[];
 }
 interface RunResults {
     status: 'passed' | 'failed';

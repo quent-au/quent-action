@@ -35,6 +35,7 @@ interface TestInfo {
     testName: string;
     status: 'passed' | 'failed' | 'skipped' | 'flaky';
     duration: number;
+    steps: StepCapture[];
 }
 interface RunResults {
     status: 'passed' | 'failed';
@@ -53,6 +54,7 @@ export declare class TestRunner {
     private createPlaywrightConfig;
     private parseResults;
     private parseSuite;
+    private extractAttachments;
     private collectScreenshots;
 }
 export {};

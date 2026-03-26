@@ -33765,8 +33765,8 @@ class FailureReporter {
         }
         const prepared = await Promise.all(results.tests.map(async (test) => {
             const failure = failureMap.get(test.testId);
+            const steps = await this.prepareSteps(test.steps);
             if (failure) {
-                const steps = await this.prepareSteps(failure.steps);
                 return {
                     testId: test.testId,
                     testName: test.testName,
@@ -33783,7 +33783,7 @@ class FailureReporter {
                 status: test.status,
                 duration: test.duration,
                 retryCount: 0,
-                steps: [],
+                steps,
             };
         }));
         return prepared;
@@ -34082,7 +34082,7 @@ export default defineConfig({
                 core.warning(`Failed to parse quent-report.json: ${error}`);
             }
         }
-        await this.collectScreenshots(resultsDir, failures);
+        await this.collectScreenshots(resultsDir, tests);
         return {
             status: failed > 0 ? 'failed' : 'passed',
             passed,
@@ -34099,37 +34099,24 @@ export default defineConfig({
                 const testId = spec.id || spec.title;
                 const testName = `${suite.title} > ${spec.title}`;
                 const duration = lastResult?.duration || 0;
+                const steps = this.extractAttachments(lastResult);
                 if (test.status === 'expected') {
-                    tests.push({ testId, testName, status: 'passed', duration });
+                    tests.push({ testId, testName, status: 'passed', duration, steps });
                 }
                 else if (test.status === 'unexpected' || test.status === 'flaky') {
                     const status = test.status === 'flaky' ? 'flaky' : 'failed';
-                    tests.push({ testId, testName, status, duration });
-                    const failure = {
+                    tests.push({ testId, testName, status, duration, steps });
+                    failures.push({
                         testId,
                         testName,
                         error: lastResult?.error?.message || 'Test failed',
                         stack: lastResult?.error?.stack || '',
-                        steps: [],
+                        steps,
                         duration,
-                    };
-                    if (lastResult?.attachments) {
-                        for (const attachment of lastResult.attachments) {
-                            if (attachment.contentType?.includes('image')) {
-                                failure.steps.push({
-                                    stepIndex: failure.steps.length,
-                                    stepName: attachment.name,
-                                    screenshotPath: attachment.path || '',
-                                    consoleMessages: [],
-                                    networkErrors: [],
-                                });
-                            }
-                        }
-                    }
-                    failures.push(failure);
+                    });
                 }
                 else if (test.status === 'skipped') {
-                    tests.push({ testId, testName, status: 'skipped', duration });
+                    tests.push({ testId, testName, status: 'skipped', duration, steps: [] });
                 }
             }
         }
@@ -34137,11 +34124,27 @@ export default defineConfig({
             await this.parseSuite(nestedSuite, tests, failures, resultsDir);
         }
     }
-    async collectScreenshots(resultsDir, failures) {
+    extractAttachments(result) {
+        const steps = [];
+        if (!result?.attachments)
+            return steps;
+        for (const attachment of result.attachments) {
+            if (attachment.contentType?.includes('image')) {
+                steps.push({
+                    stepIndex: steps.length,
+                    stepName: attachment.name,
+                    screenshotPath: attachment.path || '',
+                    consoleMessages: [],
+                    networkErrors: [],
+                });
+            }
+        }
+        return steps;
+    }
+    async collectScreenshots(resultsDir, tests) {
         if (!fs.existsSync(resultsDir)) {
             return;
         }
-        // Walk through results directory to find screenshots
         const walkDir = (dir) => {
             const files = [];
             try {
@@ -34156,23 +34159,19 @@ export default defineConfig({
                     }
                 }
             }
-            catch (error) {
-                // Ignore errors reading directories
-            }
+            catch { /* ignore */ }
             return files;
         };
         const screenshots = walkDir(resultsDir);
-        // Associate screenshots with failures if they don't have any
-        for (const failure of failures) {
-            if (failure.steps.length === 0) {
-                // Find screenshots that might belong to this test
+        for (const test of tests) {
+            if (test.steps.length === 0 && test.status !== 'skipped') {
                 const testScreenshots = screenshots.filter((s) => {
                     const name = path.basename(s).toLowerCase();
-                    const testName = failure.testName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-                    return name.includes(testName) || name.includes(failure.testId);
+                    const testName = test.testName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+                    return name.includes(testName) || name.includes(test.testId);
                 });
                 for (let i = 0; i < testScreenshots.length; i++) {
-                    failure.steps.push({
+                    test.steps.push({
                         stepIndex: i,
                         stepName: path.basename(testScreenshots[i]),
                         screenshotPath: testScreenshots[i],

@@ -34,6 +34,7 @@ interface TestInfo {
   testName: string;
   status: 'passed' | 'failed' | 'skipped' | 'flaky';
   duration: number;
+  steps: StepCapture[];
 }
 
 interface RunResults {
@@ -74,7 +75,7 @@ export class TestRunner {
       core.error(`No test files found in ${testsDir}`);
       core.info(`Directory contents of ${testsDir}:`);
       this.logDirectoryTree(testsDir, '  ');
-      return { status: 'failed', passed: 0, failed: 0, duration: 0, tests: [], failures: [] };
+      return { status: 'failed', passed: 0, failed: 0, duration: 0, tests: [] , failures: [] };
     }
 
     core.info(`Found ${testFiles.length} test file(s):`);
@@ -267,7 +268,7 @@ export default defineConfig({
       }
     }
 
-    await this.collectScreenshots(resultsDir, failures);
+    await this.collectScreenshots(resultsDir, tests);
 
     return {
       status: failed > 0 ? 'failed' : 'passed',
@@ -292,38 +293,24 @@ export default defineConfig({
         const testName = `${suite.title} > ${spec.title}`;
         const duration = lastResult?.duration || 0;
 
+        const steps = this.extractAttachments(lastResult);
+
         if (test.status === 'expected') {
-          tests.push({ testId, testName, status: 'passed', duration });
+          tests.push({ testId, testName, status: 'passed', duration, steps });
         } else if (test.status === 'unexpected' || test.status === 'flaky') {
           const status = test.status === 'flaky' ? 'flaky' as const : 'failed' as const;
-          tests.push({ testId, testName, status, duration });
+          tests.push({ testId, testName, status, duration, steps });
 
-          const failure: TestFailure = {
+          failures.push({
             testId,
             testName,
             error: lastResult?.error?.message || 'Test failed',
             stack: lastResult?.error?.stack || '',
-            steps: [],
+            steps,
             duration,
-          };
-
-          if (lastResult?.attachments) {
-            for (const attachment of lastResult.attachments) {
-              if (attachment.contentType?.includes('image')) {
-                failure.steps.push({
-                  stepIndex: failure.steps.length,
-                  stepName: attachment.name,
-                  screenshotPath: attachment.path || '',
-                  consoleMessages: [],
-                  networkErrors: [],
-                });
-              }
-            }
-          }
-
-          failures.push(failure);
+          });
         } else if (test.status === 'skipped') {
-          tests.push({ testId, testName, status: 'skipped', duration });
+          tests.push({ testId, testName, status: 'skipped', duration, steps: [] });
         }
       }
     }
@@ -333,51 +320,60 @@ export default defineConfig({
     }
   }
 
+  private extractAttachments(result: any): StepCapture[] {
+    const steps: StepCapture[] = [];
+    if (!result?.attachments) return steps;
+
+    for (const attachment of result.attachments) {
+      if (attachment.contentType?.includes('image')) {
+        steps.push({
+          stepIndex: steps.length,
+          stepName: attachment.name,
+          screenshotPath: attachment.path || '',
+          consoleMessages: [],
+          networkErrors: [],
+        });
+      }
+    }
+    return steps;
+  }
+
   private async collectScreenshots(
     resultsDir: string,
-    failures: TestFailure[]
+    tests: TestInfo[]
   ): Promise<void> {
     if (!fs.existsSync(resultsDir)) {
       return;
     }
 
-    // Walk through results directory to find screenshots
     const walkDir = (dir: string): string[] => {
       const files: string[] = [];
-      
       try {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
-        
         for (const entry of entries) {
           const fullPath = path.join(dir, entry.name);
-          
           if (entry.isDirectory()) {
             files.push(...walkDir(fullPath));
           } else if (entry.name.endsWith('.png') || entry.name.endsWith('.jpg')) {
             files.push(fullPath);
           }
         }
-      } catch (error) {
-        // Ignore errors reading directories
-      }
-
+      } catch { /* ignore */ }
       return files;
     };
 
     const screenshots = walkDir(resultsDir);
-    
-    // Associate screenshots with failures if they don't have any
-    for (const failure of failures) {
-      if (failure.steps.length === 0) {
-        // Find screenshots that might belong to this test
+
+    for (const test of tests) {
+      if (test.steps.length === 0 && test.status !== 'skipped') {
         const testScreenshots = screenshots.filter((s) => {
           const name = path.basename(s).toLowerCase();
-          const testName = failure.testName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-          return name.includes(testName) || name.includes(failure.testId);
+          const testName = test.testName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+          return name.includes(testName) || name.includes(test.testId);
         });
 
         for (let i = 0; i < testScreenshots.length; i++) {
-          failure.steps.push({
+          test.steps.push({
             stepIndex: i,
             stepName: path.basename(testScreenshots[i]),
             screenshotPath: testScreenshots[i],

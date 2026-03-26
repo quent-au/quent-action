@@ -25,6 +25,7 @@ interface TestInfo {
   testName: string;
   status: 'passed' | 'failed' | 'skipped' | 'flaky';
   duration: number;
+  steps: StepCapture[];
 }
 
 interface RunResults {
@@ -135,9 +136,9 @@ export class FailureReporter {
     const prepared = await Promise.all(
       results.tests.map(async (test) => {
         const failure = failureMap.get(test.testId);
+        const steps = await this.prepareSteps(test.steps);
 
         if (failure) {
-          const steps = await this.prepareSteps(failure.steps);
           return {
             testId: test.testId,
             testName: test.testName,
@@ -155,7 +156,7 @@ export class FailureReporter {
           status: test.status,
           duration: test.duration,
           retryCount: 0,
-          steps: [],
+          steps,
         };
       })
     );
