@@ -33329,7 +33329,22 @@ class QuentiApi {
         return {
             testRunId: data.data.id,
             diffUrl: data.data.deepLink || `https://app.quent.ai/test-run/${data.data.id}`,
+            testResults: (data.data.testResults || []).map(r => ({
+                id: r.id,
+                testName: r.testName,
+                steps: (r.steps || []).map(s => ({
+                    stepIndex: s.stepIndex,
+                    stepName: s.stepName,
+                    id: s.id,
+                })),
+            })),
         };
+    }
+    async uploadStepScreenshot(params) {
+        await this.fetch(`/v1/test-runs/${params.testRunId}/steps/${params.stepId}/screenshot`, {
+            method: 'PUT',
+            body: JSON.stringify({ screenshot: params.screenshot }),
+        });
     }
     async waitForDecision(params) {
         const startTime = Date.now();
@@ -33711,18 +33726,16 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.FailureReporter = void 0;
 const core = __importStar(__nccwpck_require__(7484));
 const fs = __importStar(__nccwpck_require__(9896));
-const path = __importStar(__nccwpck_require__(6928));
 class FailureReporter {
     api;
     constructor(api) {
         this.api = api;
     }
     async createReport(params) {
-        const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
+        const { projectId, prNumber, branch, repo, sha, runId, results } = params;
         core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
-        // Convert screenshots to base64 and prepare ALL tests (passed + failed)
-        const tests = await this.prepareTestResults(results);
-        // Upload to Quent API via test-runs endpoint (reports ALL results)
+        // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
+        const testsMetadata = this.prepareTestMetadata(results);
         const response = await this.api.uploadTestRun({
             projectId,
             prNumber,
@@ -33731,12 +33744,49 @@ class FailureReporter {
             sha,
             runId,
             triggerType: 'PR',
-            tests,
+            tests: testsMetadata,
         });
+        // Phase 2: Upload screenshots one-by-one using the returned step IDs
+        const stepIdMap = new Map();
+        for (const tr of response.testResults) {
+            for (const step of tr.steps) {
+                if (step.id) {
+                    stepIdMap.set(`${tr.testName}::${step.stepIndex}`, step.id);
+                }
+            }
+        }
+        let uploadedCount = 0;
+        let totalScreenshots = 0;
+        for (const test of results.tests) {
+            for (const step of test.steps) {
+                if (!step.screenshotPath || !fs.existsSync(step.screenshotPath))
+                    continue;
+                totalScreenshots++;
+                const stepId = stepIdMap.get(`${test.testName}::${step.stepIndex}`);
+                if (!stepId) {
+                    core.warning(`No step ID found for ${test.testName} step ${step.stepIndex}, skipping screenshot`);
+                    continue;
+                }
+                try {
+                    const buffer = fs.readFileSync(step.screenshotPath);
+                    const base64 = buffer.toString('base64');
+                    await this.api.uploadStepScreenshot({
+                        testRunId: response.testRunId,
+                        stepId,
+                        screenshot: base64,
+                    });
+                    uploadedCount++;
+                }
+                catch (error) {
+                    core.warning(`Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
+                }
+            }
+        }
+        core.info(`Uploaded ${uploadedCount}/${totalScreenshots} screenshots`);
         // If there are failures, also create an analysis for review
         let analysisId;
         if (results.failed > 0) {
-            const failedTests = tests.filter(t => t.status === 'failed');
+            const failedTests = testsMetadata.filter(t => t.status === 'failed');
             const analysisResponse = await this.api.uploadFailure({
                 projectId,
                 prNumber,
@@ -33758,14 +33808,20 @@ class FailureReporter {
             diffUrl: response.diffUrl || (analysisId ? `https://app.quent.ai/analysis/${analysisId}` : `https://app.quent.ai/test-run/${response.testRunId}`),
         };
     }
-    async prepareTestResults(results) {
+    prepareTestMetadata(results) {
         const failureMap = new Map();
         for (const f of results.failures) {
             failureMap.set(f.testId, f);
         }
-        const prepared = await Promise.all(results.tests.map(async (test) => {
+        return results.tests.map((test) => {
             const failure = failureMap.get(test.testId);
-            const steps = await this.prepareSteps(test.steps);
+            const steps = test.steps.map((step) => ({
+                stepIndex: step.stepIndex,
+                stepName: step.stepName,
+                screenshot: '',
+                consoleMessages: step.consoleMessages || [],
+                networkErrors: step.networkErrors || [],
+            }));
             if (failure) {
                 return {
                     testId: test.testId,
@@ -33785,55 +33841,7 @@ class FailureReporter {
                 retryCount: 0,
                 steps,
             };
-        }));
-        return prepared;
-    }
-    async prepareSteps(steps) {
-        return Promise.all(steps.map(async (step) => {
-            let screenshotBase64 = '';
-            if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
-                try {
-                    const buffer = fs.readFileSync(step.screenshotPath);
-                    screenshotBase64 = buffer.toString('base64');
-                }
-                catch (error) {
-                    core.warning(`Failed to read screenshot: ${step.screenshotPath}`);
-                }
-            }
-            return {
-                stepIndex: step.stepIndex,
-                stepName: step.stepName,
-                screenshot: screenshotBase64,
-                consoleMessages: step.consoleMessages || [],
-                networkErrors: step.networkErrors || [],
-            };
-        }));
-    }
-    async collectTraceFiles(testsDir) {
-        const traces = [];
-        const resultsDir = path.join(testsDir, 'test-results');
-        if (!fs.existsSync(resultsDir)) {
-            return traces;
-        }
-        const walkDir = (dir) => {
-            try {
-                const entries = fs.readdirSync(dir, { withFileTypes: true });
-                for (const entry of entries) {
-                    const fullPath = path.join(dir, entry.name);
-                    if (entry.isDirectory()) {
-                        walkDir(fullPath);
-                    }
-                    else if (entry.name.endsWith('.zip') && entry.name.includes('trace')) {
-                        traces.push(fullPath);
-                    }
-                }
-            }
-            catch (error) {
-                // Ignore errors
-            }
-        };
-        walkDir(resultsDir);
-        return traces;
+        });
     }
 }
 exports.FailureReporter = FailureReporter;

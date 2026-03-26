@@ -1,6 +1,5 @@
 import * as core from '@actions/core';
 import * as fs from 'fs';
-import * as path from 'path';
 import { QuentiApi } from './api';
 
 interface TestFailure {
@@ -81,14 +80,13 @@ export class FailureReporter {
   }
 
   async createReport(params: CreateReportParams): Promise<ReportResult> {
-    const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
+    const { projectId, prNumber, branch, repo, sha, runId, results } = params;
 
     core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
 
-    // Convert screenshots to base64 and prepare ALL tests (passed + failed)
-    const tests = await this.prepareTestResults(results);
+    // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
+    const testsMetadata = this.prepareTestMetadata(results);
 
-    // Upload to Quent API via test-runs endpoint (reports ALL results)
     const response = await this.api.uploadTestRun({
       projectId,
       prNumber,
@@ -97,13 +95,55 @@ export class FailureReporter {
       sha,
       runId,
       triggerType: 'PR',
-      tests,
+      tests: testsMetadata,
     });
+
+    // Phase 2: Upload screenshots one-by-one using the returned step IDs
+    const stepIdMap = new Map<string, string>();
+    for (const tr of response.testResults) {
+      for (const step of tr.steps) {
+        if (step.id) {
+          stepIdMap.set(`${tr.testName}::${step.stepIndex}`, step.id);
+        }
+      }
+    }
+
+    let uploadedCount = 0;
+    let totalScreenshots = 0;
+
+    for (const test of results.tests) {
+      for (const step of test.steps) {
+        if (!step.screenshotPath || !fs.existsSync(step.screenshotPath)) continue;
+        totalScreenshots++;
+
+        const stepId = stepIdMap.get(`${test.testName}::${step.stepIndex}`);
+        if (!stepId) {
+          core.warning(`No step ID found for ${test.testName} step ${step.stepIndex}, skipping screenshot`);
+          continue;
+        }
+
+        try {
+          const buffer = fs.readFileSync(step.screenshotPath);
+          const base64 = buffer.toString('base64');
+
+          await this.api.uploadStepScreenshot({
+            testRunId: response.testRunId,
+            stepId,
+            screenshot: base64,
+          });
+          uploadedCount++;
+        } catch (error) {
+          core.warning(`Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
+        }
+      }
+    }
+
+    core.info(`Uploaded ${uploadedCount}/${totalScreenshots} screenshots`);
 
     // If there are failures, also create an analysis for review
     let analysisId: string | undefined;
     if (results.failed > 0) {
-      const failedTests = tests.filter(t => t.status === 'failed');
+      const failedTests = testsMetadata.filter(t => t.status === 'failed');
       const analysisResponse = await this.api.uploadFailure({
         projectId,
         prNumber,
@@ -127,97 +167,46 @@ export class FailureReporter {
     };
   }
 
-  private async prepareTestResults(results: RunResults): Promise<PreparedTestResult[]> {
+  private prepareTestMetadata(results: RunResults): PreparedTestResult[] {
     const failureMap = new Map<string, TestFailure>();
     for (const f of results.failures) {
       failureMap.set(f.testId, f);
     }
 
-    const prepared = await Promise.all(
-      results.tests.map(async (test) => {
-        const failure = failureMap.get(test.testId);
-        const steps = await this.prepareSteps(test.steps);
+    return results.tests.map((test) => {
+      const failure = failureMap.get(test.testId);
 
-        if (failure) {
-          return {
-            testId: test.testId,
-            testName: test.testName,
-            status: test.status === 'flaky' ? 'flaky' : 'failed',
-            duration: test.duration,
-            retryCount: 1,
-            error: { message: failure.error, stack: failure.stack },
-            steps,
-          };
-        }
+      const steps: PreparedStep[] = test.steps.map((step) => ({
+        stepIndex: step.stepIndex,
+        stepName: step.stepName,
+        screenshot: '',
+        consoleMessages: step.consoleMessages || [],
+        networkErrors: step.networkErrors || [],
+      }));
 
+      if (failure) {
         return {
           testId: test.testId,
           testName: test.testName,
-          status: test.status,
+          status: test.status === 'flaky' ? 'flaky' : 'failed',
           duration: test.duration,
-          retryCount: 0,
+          retryCount: 1,
+          error: { message: failure.error, stack: failure.stack },
           steps,
         };
-      })
-    );
-
-    return prepared;
-  }
-
-  private async prepareSteps(steps: StepCapture[]): Promise<PreparedStep[]> {
-    return Promise.all(
-      steps.map(async (step) => {
-        let screenshotBase64 = '';
-
-        if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
-          try {
-            const buffer = fs.readFileSync(step.screenshotPath);
-            screenshotBase64 = buffer.toString('base64');
-          } catch (error) {
-            core.warning(`Failed to read screenshot: ${step.screenshotPath}`);
-          }
-        }
-
-        return {
-          stepIndex: step.stepIndex,
-          stepName: step.stepName,
-          screenshot: screenshotBase64,
-          consoleMessages: step.consoleMessages || [],
-          networkErrors: step.networkErrors || [],
-        };
-      })
-    );
-  }
-
-  private async collectTraceFiles(testsDir: string): Promise<string[]> {
-    const traces: string[] = [];
-    const resultsDir = path.join(testsDir, 'test-results');
-
-    if (!fs.existsSync(resultsDir)) {
-      return traces;
-    }
-
-    const walkDir = (dir: string): void => {
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-        for (const entry of entries) {
-          const fullPath = path.join(dir, entry.name);
-
-          if (entry.isDirectory()) {
-            walkDir(fullPath);
-          } else if (entry.name.endsWith('.zip') && entry.name.includes('trace')) {
-            traces.push(fullPath);
-          }
-        }
-      } catch (error) {
-        // Ignore errors
       }
-    };
 
-    walkDir(resultsDir);
-    return traces;
+      return {
+        testId: test.testId,
+        testName: test.testName,
+        status: test.status,
+        duration: test.duration,
+        retryCount: 0,
+        steps,
+      };
+    });
   }
+
 }
 
 

@@ -50,6 +50,12 @@ interface UploadFailureResponse {
   diffUrl: string;
 }
 
+interface TestRunResult {
+  id: string;
+  testName: string;
+  steps: Array<{ stepIndex: number; stepName: string; id?: string }>;
+}
+
 interface DecisionResponse {
   status: 'pending' | 'decided' | 'timeout';
   decision?: 'bug' | 'new_feature';
@@ -140,7 +146,7 @@ export class QuentiApi {
       error?: { message: string; stack: string };
       steps: any[];
     }>;
-  }): Promise<{ testRunId: string; diffUrl: string }> {
+  }): Promise<{ testRunId: string; diffUrl: string; testResults: TestRunResult[] }> {
     core.info(`Uploading test run with ${params.tests.length} tests`);
 
     const response = await this.fetch('/v1/test-runs', {
@@ -156,12 +162,44 @@ export class QuentiApi {
       }),
     });
 
-    const data = await response.json() as { success: boolean; data: { id: string; runNumber: number; deepLink: string } };
+    const data = await response.json() as {
+      success: boolean;
+      data: {
+        id: string;
+        runNumber: number;
+        deepLink: string;
+        testResults?: Array<{
+          id: string;
+          testName: string;
+          steps: Array<{ stepIndex: number; stepName: string; id?: string }>;
+        }>;
+      };
+    };
     
     return {
       testRunId: data.data.id,
       diffUrl: data.data.deepLink || `https://app.quent.ai/test-run/${data.data.id}`,
+      testResults: (data.data.testResults || []).map(r => ({
+        id: r.id,
+        testName: r.testName,
+        steps: (r.steps || []).map(s => ({
+          stepIndex: s.stepIndex,
+          stepName: s.stepName,
+          id: s.id,
+        })),
+      })),
     };
+  }
+
+  async uploadStepScreenshot(params: {
+    testRunId: string;
+    stepId: string;
+    screenshot: string;
+  }): Promise<void> {
+    await this.fetch(`/v1/test-runs/${params.testRunId}/steps/${params.stepId}/screenshot`, {
+      method: 'PUT',
+      body: JSON.stringify({ screenshot: params.screenshot }),
+    });
   }
 
   async waitForDecision(params: { analysisId: string; timeout: number }): Promise<DecisionResponse> {

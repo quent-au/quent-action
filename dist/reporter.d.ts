@@ -57,8 +57,6 @@ export declare class FailureReporter {
     private api;
     constructor(api: QuentiApi);
     createReport(params: CreateReportParams): Promise<ReportResult>;
-    private prepareTestResults;
-    private prepareSteps;
-    private collectTraceFiles;
+    private prepareTestMetadata;
 }
 export {};
