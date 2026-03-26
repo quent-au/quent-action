@@ -33730,7 +33730,7 @@ class FailureReporter {
             repo,
             sha,
             runId,
-            triggerType: 'CI_PR',
+            triggerType: 'PR',
             tests,
         });
         // If there are failures, also create an analysis for review

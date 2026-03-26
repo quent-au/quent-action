@@ -95,7 +95,7 @@ export class FailureReporter {
       repo,
       sha,
       runId,
-      triggerType: 'CI_PR',
+      triggerType: 'PR',
       tests,
     });
 
