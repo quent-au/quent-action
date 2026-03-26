@@ -65,7 +65,12 @@ async function run(): Promise<void> {
     
     const zip = new AdmZip(testsZipPath);
     zip.extractAllTo(testsDir, true);
-    core.info(`✅ Tests extracted to ${testsDir}`);
+
+    const extractedEntries = zip.getEntries().map(e => e.entryName);
+    core.info(`Extracted ${extractedEntries.length} files to ${testsDir}`);
+    for (const entry of extractedEntries) {
+      core.info(`  ${entry}`);
+    }
     core.endGroup();
 
     // Step 2: Install Playwright

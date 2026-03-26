@@ -41,6 +41,8 @@ export declare class TestRunner {
     private options;
     constructor(options: RunnerOptions);
     run(): Promise<RunResults>;
+    private findTestFiles;
+    private logDirectoryTree;
     private createPlaywrightConfig;
     private parseResults;
     private parseSuite;

@@ -33467,7 +33467,11 @@ async function run() {
         await io.mkdirP(testsDir);
         const zip = new adm_zip_1.default(testsZipPath);
         zip.extractAllTo(testsDir, true);
-        core.info(`✅ Tests extracted to ${testsDir}`);
+        const extractedEntries = zip.getEntries().map(e => e.entryName);
+        core.info(`Extracted ${extractedEntries.length} files to ${testsDir}`);
+        for (const entry of extractedEntries) {
+            core.info(`  ${entry}`);
+        }
         core.endGroup();
         // Step 2: Install Playwright
         core.startGroup('🎭 Installing Playwright');
@@ -33878,25 +33882,39 @@ class TestRunner {
     async run() {
         const { testsDir, baseUrl, browser, retries } = this.options;
         const resultsDir = path.join(testsDir, 'test-results');
-        // Create playwright config if it doesn't exist
         const configPath = path.join(testsDir, 'playwright.config.ts');
         if (!fs.existsSync(configPath)) {
             await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
         }
-        // Install dependencies
         const packageJsonPath = path.join(testsDir, 'package.json');
         if (fs.existsSync(packageJsonPath)) {
+            core.info('Installing test dependencies...');
             await exec.exec('npm', ['install', '--no-audit', '--no-fund'], { cwd: testsDir });
         }
-        // Run playwright tests
+        else {
+            core.warning(`No package.json found in ${testsDir}`);
+        }
+        const testFiles = this.findTestFiles(testsDir);
+        if (testFiles.length === 0) {
+            core.error(`No test files found in ${testsDir}`);
+            core.info(`Directory contents of ${testsDir}:`);
+            this.logDirectoryTree(testsDir, '  ');
+            return { status: 'failed', passed: 0, failed: 0, duration: 0, failures: [] };
+        }
+        core.info(`Found ${testFiles.length} test file(s):`);
+        for (const f of testFiles) {
+            core.info(`  ${path.relative(testsDir, f)}`);
+        }
         let exitCode = 0;
         let stdout = '';
         let stderr = '';
+        const resultsJsonPath = path.join(resultsDir, 'results.json');
+        core.info(`Starting Playwright (browser=${browser}, baseUrl=${baseUrl})...`);
         try {
             exitCode = await exec.exec('npx', [
                 'playwright',
                 'test',
-                '--reporter=json,html',
+                '--reporter=line,json',
                 `--output=${resultsDir}`,
             ], {
                 cwd: testsDir,
@@ -33906,6 +33924,7 @@ class TestRunner {
                     QUENT_API_KEY: this.options.apiKey,
                     QUENT_API_URL: this.options.apiUrl || 'https://quent-service.vercel.app',
                     PWTEST_SKIP_TEST_OUTPUT: '1',
+                    PLAYWRIGHT_JSON_OUTPUT_NAME: resultsJsonPath,
                 },
                 ignoreReturnCode: true,
                 listeners: {
@@ -33919,11 +33938,52 @@ class TestRunner {
             });
         }
         catch (error) {
-            core.warning(`Test execution error: ${error}`);
+            core.error(`Test execution threw an exception: ${error}`);
         }
-        // Parse results
+        core.info(`Playwright exited with code ${exitCode}`);
+        if (stderr.trim()) {
+            core.warning(`Playwright stderr:\n${stderr.trim()}`);
+        }
         const results = await this.parseResults(testsDir, resultsDir);
+        core.info(`Test results: ${results.passed} passed, ${results.failed} failed (${results.duration}ms)`);
         return results;
+    }
+    findTestFiles(dir) {
+        const files = [];
+        const walk = (d) => {
+            try {
+                for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+                    const full = path.join(d, entry.name);
+                    if (entry.name === 'node_modules')
+                        continue;
+                    if (entry.isDirectory()) {
+                        walk(full);
+                    }
+                    else if (/\.(spec|test)\.(ts|js|mjs)$/.test(entry.name)) {
+                        files.push(full);
+                    }
+                }
+            }
+            catch { /* ignore */ }
+        };
+        walk(dir);
+        return files;
+    }
+    logDirectoryTree(dir, indent, depth = 0) {
+        if (depth > 3)
+            return;
+        try {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (entry.name === 'node_modules' || entry.name === '.git')
+                    continue;
+                const full = path.join(dir, entry.name);
+                core.info(`${indent}${entry.isDirectory() ? entry.name + '/' : entry.name}`);
+                if (entry.isDirectory()) {
+                    this.logDirectoryTree(full, indent + '  ', depth + 1);
+                }
+            }
+        }
+        catch { /* ignore */ }
     }
     async createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir) {
         const config = `
@@ -33965,8 +34025,8 @@ export default defineConfig({
         let failed = 0;
         let duration = 0;
         const failures = [];
-        // Try to read Playwright's JSON report
         if (fs.existsSync(resultsFile)) {
+            core.info(`Found results file: ${resultsFile}`);
             try {
                 const rawData = fs.readFileSync(resultsFile, 'utf-8');
                 const data = JSON.parse(rawData);
@@ -33984,7 +34044,9 @@ export default defineConfig({
                 core.warning(`Failed to parse results.json: ${error}`);
             }
         }
-        // Also try quent-report.json
+        else {
+            core.warning(`Results file not found at ${resultsFile} — Playwright may not have run any tests`);
+        }
         if (fs.existsSync(quentReportFile)) {
             try {
                 const rawData = fs.readFileSync(quentReportFile, 'utf-8');
