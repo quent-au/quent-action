@@ -20,11 +20,19 @@ interface StepCapture {
   networkErrors: Array<{ url: string; status: number; statusText: string; method: string }>;
 }
 
+interface TestInfo {
+  testId: string;
+  testName: string;
+  status: 'passed' | 'failed' | 'skipped' | 'flaky';
+  duration: number;
+}
+
 interface RunResults {
   status: 'passed' | 'failed';
   passed: number;
   failed: number;
   duration: number;
+  tests: TestInfo[];
   failures: TestFailure[];
 }
 
@@ -119,27 +127,40 @@ export class FailureReporter {
   }
 
   private async prepareTestResults(results: RunResults): Promise<PreparedTestResult[]> {
-    // Construct from failures
-    const failedTests = await Promise.all(
-      results.failures.map(async (failure) => {
-        const steps = await this.prepareSteps(failure.steps);
+    const failureMap = new Map<string, TestFailure>();
+    for (const f of results.failures) {
+      failureMap.set(f.testId, f);
+    }
+
+    const prepared = await Promise.all(
+      results.tests.map(async (test) => {
+        const failure = failureMap.get(test.testId);
+
+        if (failure) {
+          const steps = await this.prepareSteps(failure.steps);
+          return {
+            testId: test.testId,
+            testName: test.testName,
+            status: test.status === 'flaky' ? 'flaky' : 'failed',
+            duration: test.duration,
+            retryCount: 1,
+            error: { message: failure.error, stack: failure.stack },
+            steps,
+          };
+        }
 
         return {
-          testId: failure.testId,
-          testName: failure.testName,
-          status: 'failed',
-          duration: failure.duration,
-          retryCount: 1,
-          error: {
-            message: failure.error,
-            stack: failure.stack,
-          },
-          steps,
+          testId: test.testId,
+          testName: test.testName,
+          status: test.status,
+          duration: test.duration,
+          retryCount: 0,
+          steps: [],
         };
       })
     );
 
-    return failedTests;
+    return prepared;
   }
 
   private async prepareSteps(steps: StepCapture[]): Promise<PreparedStep[]> {

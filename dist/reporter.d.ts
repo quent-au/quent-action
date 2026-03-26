@@ -23,11 +23,18 @@ interface StepCapture {
         method: string;
     }>;
 }
+interface TestInfo {
+    testId: string;
+    testName: string;
+    status: 'passed' | 'failed' | 'skipped' | 'flaky';
+    duration: number;
+}
 interface RunResults {
     status: 'passed' | 'failed';
     passed: number;
     failed: number;
     duration: number;
+    tests: TestInfo[];
     failures: TestFailure[];
 }
 interface CreateReportParams {

@@ -29,11 +29,19 @@ interface StepCapture {
   networkErrors: Array<{ url: string; status: number; statusText: string; method: string }>;
 }
 
+interface TestInfo {
+  testId: string;
+  testName: string;
+  status: 'passed' | 'failed' | 'skipped' | 'flaky';
+  duration: number;
+}
+
 interface RunResults {
   status: 'passed' | 'failed';
   passed: number;
   failed: number;
   duration: number;
+  tests: TestInfo[];
   failures: TestFailure[];
 }
 
@@ -66,7 +74,7 @@ export class TestRunner {
       core.error(`No test files found in ${testsDir}`);
       core.info(`Directory contents of ${testsDir}:`);
       this.logDirectoryTree(testsDir, '  ');
-      return { status: 'failed', passed: 0, failed: 0, duration: 0, failures: [] };
+      return { status: 'failed', passed: 0, failed: 0, duration: 0, tests: [], failures: [] };
     }
 
     core.info(`Found ${testFiles.length} test file(s):`);
@@ -173,10 +181,10 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './specs',
-  fullyParallel: true,
+  fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: ${retries},
-  workers: process.env.CI ? 1 : undefined,
+  workers: 1,
   reporter: [
     ['html', { outputFolder: '${resultsDir}/html-report' }],
     ['json', { outputFile: '${resultsDir}/results.json' }],
@@ -202,13 +210,12 @@ export default defineConfig({
 
   private async parseResults(testsDir: string, resultsDir: string): Promise<RunResults> {
     const resultsFile = path.join(resultsDir, 'results.json');
-    
-    // Check if quent-report.json exists (from custom reporter)
     const quentReportFile = path.join(resultsDir, 'quent-report.json');
     
     let passed = 0;
     let failed = 0;
     let duration = 0;
+    const tests: TestInfo[] = [];
     const failures: TestFailure[] = [];
 
     if (fs.existsSync(resultsFile)) {
@@ -217,10 +224,9 @@ export default defineConfig({
         const rawData = fs.readFileSync(resultsFile, 'utf-8');
         const data = JSON.parse(rawData);
 
-        // Parse Playwright JSON report format
         if (data.suites) {
           for (const suite of data.suites) {
-            await this.parseSuite(suite, failures, resultsDir);
+            await this.parseSuite(suite, tests, failures, resultsDir);
           }
         }
 
@@ -261,7 +267,6 @@ export default defineConfig({
       }
     }
 
-    // Find screenshots in results directory
     await this.collectScreenshots(resultsDir, failures);
 
     return {
@@ -269,31 +274,39 @@ export default defineConfig({
       passed,
       failed,
       duration,
+      tests,
       failures,
     };
   }
 
   private async parseSuite(
     suite: any,
+    tests: TestInfo[],
     failures: TestFailure[],
     resultsDir: string
   ): Promise<void> {
-    // Process specs in this suite
     for (const spec of suite.specs || []) {
       for (const test of spec.tests || []) {
         const lastResult = test.results?.[test.results.length - 1];
-        
-        if (test.status === 'unexpected' || test.status === 'flaky') {
+        const testId = spec.id || spec.title;
+        const testName = `${suite.title} > ${spec.title}`;
+        const duration = lastResult?.duration || 0;
+
+        if (test.status === 'expected') {
+          tests.push({ testId, testName, status: 'passed', duration });
+        } else if (test.status === 'unexpected' || test.status === 'flaky') {
+          const status = test.status === 'flaky' ? 'flaky' as const : 'failed' as const;
+          tests.push({ testId, testName, status, duration });
+
           const failure: TestFailure = {
-            testId: spec.id || spec.title,
-            testName: `${suite.title} > ${spec.title}`,
+            testId,
+            testName,
             error: lastResult?.error?.message || 'Test failed',
             stack: lastResult?.error?.stack || '',
             steps: [],
-            duration: lastResult?.duration || 0,
+            duration,
           };
 
-          // Extract step info from attachments
           if (lastResult?.attachments) {
             for (const attachment of lastResult.attachments) {
               if (attachment.contentType?.includes('image')) {
@@ -309,13 +322,14 @@ export default defineConfig({
           }
 
           failures.push(failure);
+        } else if (test.status === 'skipped') {
+          tests.push({ testId, testName, status: 'skipped', duration });
         }
       }
     }
 
-    // Recurse into nested suites
     for (const nestedSuite of suite.suites || []) {
-      await this.parseSuite(nestedSuite, failures, resultsDir);
+      await this.parseSuite(nestedSuite, tests, failures, resultsDir);
     }
   }
 
