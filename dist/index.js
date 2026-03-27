@@ -34157,6 +34157,13 @@ export default defineConfig({
                 const testId = spec.id || spec.title;
                 const testName = `${suite.title} > ${spec.title}`;
                 const duration = lastResult?.duration || 0;
+                // Log all attachments for debugging
+                const attachments = lastResult?.attachments || [];
+                core.info(`  "${testName}": ${attachments.length} attachment(s)`);
+                for (const a of attachments) {
+                    const exists = a.path ? fs.existsSync(a.path) : false;
+                    core.info(`    - name="${a.name}" type="${a.contentType}" path="${a.path || '(none)'}" exists=${exists}`);
+                }
                 let steps = this.extractTraceScreenshots(lastResult, resultsDir);
                 if (steps.length === 0) {
                     steps = this.extractAttachments(lastResult);
@@ -34188,11 +34195,20 @@ export default defineConfig({
     }
     extractTraceScreenshots(result, resultsDir) {
         const steps = [];
-        if (!result?.attachments)
+        if (!result?.attachments) {
+            core.info(`  [trace] No attachments on result`);
             return steps;
+        }
         const traceAttachment = result.attachments.find((a) => a.name === 'trace' && a.path);
-        if (!traceAttachment?.path || !fs.existsSync(traceAttachment.path))
+        if (!traceAttachment) {
+            core.info(`  [trace] No trace attachment found (have: ${result.attachments.map((a) => a.name).join(', ')})`);
             return steps;
+        }
+        if (!fs.existsSync(traceAttachment.path)) {
+            core.warning(`  [trace] Trace file not found at: ${traceAttachment.path}`);
+            return steps;
+        }
+        core.info(`  [trace] Found trace at: ${traceAttachment.path}`);
         try {
             const zip = new adm_zip_1.default(traceAttachment.path);
             const entries = zip.getEntries();
