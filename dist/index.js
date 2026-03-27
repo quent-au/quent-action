@@ -33449,6 +33449,7 @@ async function run() {
         const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
         const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
         const browser = core.getInput('browser') || 'chromium';
+        const debugTests = core.getInput('debug-tests') !== 'false';
         // Get GitHub context
         const context = github.context;
         const isPullRequest = context.eventName === 'pull_request';
@@ -33539,6 +33540,7 @@ async function run() {
             runId: context.runId.toString(),
             results,
             testsDir,
+            debugTests,
         });
         core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
         core.info(`🔗 View results: ${report.diffUrl}`);
@@ -33732,8 +33734,8 @@ class FailureReporter {
         this.api = api;
     }
     async createReport(params) {
-        const { projectId, prNumber, branch, repo, sha, runId, results } = params;
-        core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
+        const { projectId, prNumber, branch, repo, sha, runId, results, debugTests } = params;
+        core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed (debugTests=${debugTests})`);
         const totalSteps = results.tests.reduce((sum, t) => sum + t.steps.length, 0);
         core.info(`Total steps across all tests: ${totalSteps}`);
         // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
@@ -33768,6 +33770,11 @@ class FailureReporter {
         let skippedCount = 0;
         let totalScreenshots = 0;
         for (const test of results.tests) {
+            if (!debugTests && (test.status === 'passed' || test.status === 'skipped')) {
+                core.info(`  [skip] ${test.testName}: not uploading screenshots (debugTests=false, status=${test.status})`);
+                skippedCount += test.steps.length;
+                continue;
+            }
             for (const step of test.steps) {
                 if (!step.screenshotPath) {
                     core.info(`  [skip] ${test.testName} step ${step.stepIndex}: no screenshot path`);
@@ -33910,16 +33917,12 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.TestRunner = void 0;
 const core = __importStar(__nccwpck_require__(7484));
 const exec = __importStar(__nccwpck_require__(5236));
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
-const adm_zip_1 = __importDefault(__nccwpck_require__(1316));
 class TestRunner {
     options;
     constructor(options) {
@@ -34056,8 +34059,8 @@ export default defineConfig({
   ],
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
-    trace: 'on',
-    screenshot: 'on',
+    trace: 'off',
+    screenshot: 'off',
     video: 'off',
   },
   outputDir: '${resultsDir}',
@@ -34102,7 +34105,7 @@ export default defineConfig({
                 const data = JSON.parse(rawData);
                 if (data.suites) {
                     for (const suite of data.suites) {
-                        await this.parseSuite(suite, tests, failures, resultsDir);
+                        this.parseSuite(suite, tests, failures);
                     }
                 }
                 passed = data.stats?.expected || 0;
@@ -34150,24 +34153,20 @@ export default defineConfig({
             failures,
         };
     }
-    async parseSuite(suite, tests, failures, resultsDir) {
+    parseSuite(suite, tests, failures) {
         for (const spec of suite.specs || []) {
             for (const test of spec.tests || []) {
                 const lastResult = test.results?.[test.results.length - 1];
                 const testId = spec.id || spec.title;
                 const testName = `${suite.title} > ${spec.title}`;
                 const duration = lastResult?.duration || 0;
-                // Log all attachments for debugging
                 const attachments = lastResult?.attachments || [];
                 core.info(`  "${testName}": ${attachments.length} attachment(s)`);
                 for (const a of attachments) {
                     const exists = a.path ? fs.existsSync(a.path) : false;
                     core.info(`    - name="${a.name}" type="${a.contentType}" path="${a.path || '(none)'}" exists=${exists}`);
                 }
-                let steps = this.extractTraceScreenshots(lastResult, resultsDir);
-                if (steps.length === 0) {
-                    steps = this.extractAttachments(lastResult);
-                }
+                const steps = this.extractAttachments(lastResult);
                 core.info(`  Parsed "${testName}": ${test.status}, ${steps.length} step(s)`);
                 if (test.status === 'expected') {
                     tests.push({ testId, testName, status: 'passed', duration, steps });
@@ -34190,170 +34189,26 @@ export default defineConfig({
             }
         }
         for (const nestedSuite of suite.suites || []) {
-            await this.parseSuite(nestedSuite, tests, failures, resultsDir);
+            this.parseSuite(nestedSuite, tests, failures);
         }
-    }
-    extractTraceScreenshots(result, resultsDir) {
-        const steps = [];
-        if (!result?.attachments) {
-            core.info(`  [trace] No attachments on result`);
-            return steps;
-        }
-        const traceAttachment = result.attachments.find((a) => a.name === 'trace' && a.path);
-        if (!traceAttachment) {
-            core.info(`  [trace] No trace attachment found (have: ${result.attachments.map((a) => a.name).join(', ')})`);
-            return steps;
-        }
-        if (!fs.existsSync(traceAttachment.path)) {
-            core.warning(`  [trace] Trace file not found at: ${traceAttachment.path}`);
-            return steps;
-        }
-        core.info(`  [trace] Found trace at: ${traceAttachment.path}`);
-        try {
-            const zip = new adm_zip_1.default(traceAttachment.path);
-            const entries = zip.getEntries();
-            // Parse trace events from all .trace files
-            const traceFiles = entries.filter(e => e.entryName.endsWith('.trace'));
-            const actions = [];
-            const frames = [];
-            const eventTypeCounts = new Map();
-            let sampleEvent = null;
-            // First pass: understand the trace format
-            const beforeEvents = new Map();
-            for (const traceFile of traceFiles) {
-                core.info(`  [trace] Parsing file: ${traceFile.entryName} (${traceFile.header.size} bytes)`);
-                const content = traceFile.getData().toString('utf-8');
-                for (const line of content.split('\n')) {
-                    if (!line.trim())
-                        continue;
-                    try {
-                        const event = JSON.parse(line);
-                        const t = event.type || 'unknown';
-                        eventTypeCounts.set(t, (eventTypeCounts.get(t) || 0) + 1);
-                        // Log first non-screencast event for format discovery
-                        if (!sampleEvent && t !== 'screencast-frame' && t !== 'context-options' && t !== 'resource-snapshot') {
-                            sampleEvent = JSON.stringify(event).substring(0, 500);
-                        }
-                        // Handle before/after pattern
-                        if (t === 'before' && event.callId && event.apiName) {
-                            beforeEvents.set(event.callId, {
-                                apiName: event.apiName,
-                                wallTime: event.wallTime || event.startTime || 0,
-                            });
-                        }
-                        if (t === 'after' && event.callId) {
-                            const before = beforeEvents.get(event.callId);
-                            if (before) {
-                                actions.push({
-                                    apiName: before.apiName,
-                                    endTime: event.wallTime || event.endTime || before.wallTime || 0,
-                                });
-                            }
-                        }
-                        // Handle single "action" event pattern (some Playwright versions)
-                        if (t === 'action' && event.apiName) {
-                            actions.push({
-                                apiName: event.apiName,
-                                endTime: event.wallTime || event.endTime || event.startTime || 0,
-                            });
-                        }
-                        if (t === 'screencast-frame' && event.sha1) {
-                            frames.push({
-                                sha1: event.sha1,
-                                timestamp: event.timestamp || 0,
-                            });
-                        }
-                    }
-                    catch { /* skip malformed lines */ }
-                }
-            }
-            // Log trace format diagnostics
-            const typeSummary = Array.from(eventTypeCounts.entries()).map(([k, v]) => `${k}:${v}`).join(', ');
-            core.info(`  [trace] Event types: ${typeSummary}`);
-            if (sampleEvent) {
-                core.info(`  [trace] Sample event: ${sampleEvent}`);
-            }
-            // Filter to only user-facing actions (skip internal ones)
-            const userActions = actions.filter(a => !a.apiName.startsWith('tracing.') &&
-                !a.apiName.startsWith('browserContext.') &&
-                !a.apiName.startsWith('browser.'));
-            core.info(`  Trace: ${userActions.length} actions, ${frames.length} screencast frames`);
-            if (userActions.length === 0 || frames.length === 0)
-                return steps;
-            // Sort frames by timestamp
-            frames.sort((a, b) => a.timestamp - b.timestamp);
-            // Extract PNGs from zip resources
-            const extractDir = path.join(resultsDir, `trace-screenshots-${Date.now()}`);
-            fs.mkdirSync(extractDir, { recursive: true });
-            const pngEntries = entries.filter(e => e.entryName.startsWith('resources/') && e.entryName.endsWith('.png'));
-            const shaToPath = new Map();
-            for (const entry of pngEntries) {
-                const sha = path.basename(entry.entryName, '.png');
-                const outPath = path.join(extractDir, `${sha}.png`);
-                fs.writeFileSync(outPath, entry.getData());
-                shaToPath.set(sha, outPath);
-            }
-            // For each action, find the screencast frame closest AFTER the action ended
-            const usedFrameIndices = new Set();
-            for (const action of userActions) {
-                let bestIdx = -1;
-                let bestDelta = Infinity;
-                for (let i = 0; i < frames.length; i++) {
-                    if (usedFrameIndices.has(i))
-                        continue;
-                    const delta = frames[i].timestamp - action.endTime;
-                    if (delta >= 0 && delta < bestDelta) {
-                        bestDelta = delta;
-                        bestIdx = i;
-                    }
-                }
-                // If no frame after, take the closest frame before
-                if (bestIdx === -1) {
-                    for (let i = frames.length - 1; i >= 0; i--) {
-                        if (usedFrameIndices.has(i))
-                            continue;
-                        if (frames[i].timestamp <= action.endTime) {
-                            bestIdx = i;
-                            break;
-                        }
-                    }
-                }
-                if (bestIdx >= 0) {
-                    const frame = frames[bestIdx];
-                    const screenshotPath = shaToPath.get(frame.sha1);
-                    if (screenshotPath) {
-                        usedFrameIndices.add(bestIdx);
-                        steps.push({
-                            stepIndex: steps.length,
-                            stepName: action.apiName,
-                            screenshotPath,
-                            consoleMessages: [],
-                            networkErrors: [],
-                        });
-                    }
-                }
-            }
-            core.info(`  Extracted ${steps.length} step screenshots from trace`);
-        }
-        catch (error) {
-            core.warning(`Failed to extract trace screenshots: ${error}`);
-        }
-        return steps;
     }
     extractAttachments(result) {
         const steps = [];
         if (!result?.attachments)
             return steps;
+        const BUILTIN_NAMES = new Set(['screenshot', 'trace', 'video']);
         for (const attachment of result.attachments) {
-            if (attachment.contentType?.includes('image')) {
-                steps.push({
-                    stepIndex: steps.length,
-                    stepName: attachment.name,
-                    screenshotPath: attachment.path || '',
-                    consoleMessages: [],
-                    networkErrors: [],
-                });
-            }
+            if (!attachment.contentType?.includes('image'))
+                continue;
+            if (BUILTIN_NAMES.has(attachment.name))
+                continue;
+            steps.push({
+                stepIndex: steps.length,
+                stepName: attachment.name,
+                screenshotPath: attachment.path || '',
+                consoleMessages: [],
+                networkErrors: [],
+            });
         }
         return steps;
     }

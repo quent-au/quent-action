@@ -64,6 +64,7 @@ interface CreateReportParams {
   runId: string;
   results: RunResults;
   testsDir: string;
+  debugTests: boolean;
 }
 
 interface ReportResult {
@@ -80,9 +81,9 @@ export class FailureReporter {
   }
 
   async createReport(params: CreateReportParams): Promise<ReportResult> {
-    const { projectId, prNumber, branch, repo, sha, runId, results } = params;
+    const { projectId, prNumber, branch, repo, sha, runId, results, debugTests } = params;
 
-    core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
+    core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed (debugTests=${debugTests})`);
 
     const totalSteps = results.tests.reduce((sum, t) => sum + t.steps.length, 0);
     core.info(`Total steps across all tests: ${totalSteps}`);
@@ -124,6 +125,12 @@ export class FailureReporter {
     let totalScreenshots = 0;
 
     for (const test of results.tests) {
+      if (!debugTests && (test.status === 'passed' || test.status === 'skipped')) {
+        core.info(`  [skip] ${test.testName}: not uploading screenshots (debugTests=false, status=${test.status})`);
+        skippedCount += test.steps.length;
+        continue;
+      }
+
       for (const step of test.steps) {
         if (!step.screenshotPath) {
           core.info(`  [skip] ${test.testName} step ${step.stepIndex}: no screenshot path`);

@@ -47,6 +47,7 @@ interface CreateReportParams {
     runId: string;
     results: RunResults;
     testsDir: string;
+    debugTests: boolean;
 }
 interface ReportResult {
     analysisId?: string;

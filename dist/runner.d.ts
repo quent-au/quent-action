@@ -55,7 +55,6 @@ export declare class TestRunner {
     private detectTestDir;
     private parseResults;
     private parseSuite;
-    private extractTraceScreenshots;
     private extractAttachments;
 }
 export {};

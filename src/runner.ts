@@ -2,7 +2,6 @@ import * as core from '@actions/core';
 import * as exec from '@actions/exec';
 import * as fs from 'fs';
 import * as path from 'path';
-import AdmZip from 'adm-zip';
 
 interface RunnerOptions {
   testsDir: string;
@@ -204,8 +203,8 @@ export default defineConfig({
   ],
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
-    trace: 'on',
-    screenshot: 'on',
+    trace: 'off',
+    screenshot: 'off',
     video: 'off',
   },
   outputDir: '${resultsDir}',
@@ -254,7 +253,7 @@ export default defineConfig({
 
         if (data.suites) {
           for (const suite of data.suites) {
-            await this.parseSuite(suite, tests, failures, resultsDir);
+            this.parseSuite(suite, tests, failures);
           }
         }
 
@@ -305,12 +304,11 @@ export default defineConfig({
     };
   }
 
-  private async parseSuite(
+  private parseSuite(
     suite: any,
     tests: TestInfo[],
     failures: TestFailure[],
-    resultsDir: string
-  ): Promise<void> {
+  ): void {
     for (const spec of suite.specs || []) {
       for (const test of spec.tests || []) {
         const lastResult = test.results?.[test.results.length - 1];
@@ -318,7 +316,6 @@ export default defineConfig({
         const testName = `${suite.title} > ${spec.title}`;
         const duration = lastResult?.duration || 0;
 
-        // Log all attachments for debugging
         const attachments = lastResult?.attachments || [];
         core.info(`  "${testName}": ${attachments.length} attachment(s)`);
         for (const a of attachments) {
@@ -326,11 +323,7 @@ export default defineConfig({
           core.info(`    - name="${a.name}" type="${a.contentType}" path="${a.path || '(none)'}" exists=${exists}`);
         }
 
-        let steps = this.extractTraceScreenshots(lastResult, resultsDir);
-        if (steps.length === 0) {
-          steps = this.extractAttachments(lastResult);
-        }
-
+        const steps = this.extractAttachments(lastResult);
         core.info(`  Parsed "${testName}": ${test.status}, ${steps.length} step(s)`);
 
         if (test.status === 'expected') {
@@ -354,200 +347,28 @@ export default defineConfig({
     }
 
     for (const nestedSuite of suite.suites || []) {
-      await this.parseSuite(nestedSuite, tests, failures, resultsDir);
+      this.parseSuite(nestedSuite, tests, failures);
     }
-  }
-
-  private extractTraceScreenshots(result: any, resultsDir: string): StepCapture[] {
-    const steps: StepCapture[] = [];
-    if (!result?.attachments) {
-      core.info(`  [trace] No attachments on result`);
-      return steps;
-    }
-
-    const traceAttachment = result.attachments.find(
-      (a: any) => a.name === 'trace' && a.path
-    );
-    if (!traceAttachment) {
-      core.info(`  [trace] No trace attachment found (have: ${result.attachments.map((a: any) => a.name).join(', ')})`);
-      return steps;
-    }
-    if (!fs.existsSync(traceAttachment.path)) {
-      core.warning(`  [trace] Trace file not found at: ${traceAttachment.path}`);
-      return steps;
-    }
-    core.info(`  [trace] Found trace at: ${traceAttachment.path}`);
-
-    try {
-      const zip = new AdmZip(traceAttachment.path);
-      const entries = zip.getEntries();
-
-      // Parse trace events from all .trace files
-      const traceFiles = entries.filter(e => e.entryName.endsWith('.trace'));
-
-      const actions: Array<{ apiName: string; endTime: number }> = [];
-      const frames: Array<{ sha1: string; timestamp: number }> = [];
-      const eventTypeCounts = new Map<string, number>();
-      let sampleEvent: string | null = null;
-
-      // First pass: understand the trace format
-      const beforeEvents = new Map<string, { apiName: string; wallTime: number }>();
-
-      for (const traceFile of traceFiles) {
-        core.info(`  [trace] Parsing file: ${traceFile.entryName} (${traceFile.header.size} bytes)`);
-        const content = traceFile.getData().toString('utf-8');
-        for (const line of content.split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-            const t = event.type || 'unknown';
-            eventTypeCounts.set(t, (eventTypeCounts.get(t) || 0) + 1);
-
-            // Log first non-screencast event for format discovery
-            if (!sampleEvent && t !== 'screencast-frame' && t !== 'context-options' && t !== 'resource-snapshot') {
-              sampleEvent = JSON.stringify(event).substring(0, 500);
-            }
-
-            // Handle before/after pattern
-            if (t === 'before' && event.callId && event.apiName) {
-              beforeEvents.set(event.callId, {
-                apiName: event.apiName,
-                wallTime: event.wallTime || event.startTime || 0,
-              });
-            }
-            if (t === 'after' && event.callId) {
-              const before = beforeEvents.get(event.callId);
-              if (before) {
-                actions.push({
-                  apiName: before.apiName,
-                  endTime: event.wallTime || event.endTime || before.wallTime || 0,
-                });
-              }
-            }
-
-            // Handle single "action" event pattern (some Playwright versions)
-            if (t === 'action' && event.apiName) {
-              actions.push({
-                apiName: event.apiName,
-                endTime: event.wallTime || event.endTime || event.startTime || 0,
-              });
-            }
-
-            if (t === 'screencast-frame' && event.sha1) {
-              frames.push({
-                sha1: event.sha1,
-                timestamp: event.timestamp || 0,
-              });
-            }
-          } catch { /* skip malformed lines */ }
-        }
-      }
-
-      // Log trace format diagnostics
-      const typeSummary = Array.from(eventTypeCounts.entries()).map(([k, v]) => `${k}:${v}`).join(', ');
-      core.info(`  [trace] Event types: ${typeSummary}`);
-      if (sampleEvent) {
-        core.info(`  [trace] Sample event: ${sampleEvent}`);
-      }
-
-      // Filter to only user-facing actions (skip internal ones)
-      const userActions = actions.filter(a =>
-        !a.apiName.startsWith('tracing.') &&
-        !a.apiName.startsWith('browserContext.') &&
-        !a.apiName.startsWith('browser.')
-      );
-
-      core.info(`  Trace: ${userActions.length} actions, ${frames.length} screencast frames`);
-
-      if (userActions.length === 0 || frames.length === 0) return steps;
-
-      // Sort frames by timestamp
-      frames.sort((a, b) => a.timestamp - b.timestamp);
-
-      // Extract PNGs from zip resources
-      const extractDir = path.join(resultsDir, `trace-screenshots-${Date.now()}`);
-      fs.mkdirSync(extractDir, { recursive: true });
-
-      const pngEntries = entries.filter(
-        e => e.entryName.startsWith('resources/') && e.entryName.endsWith('.png')
-      );
-      const shaToPath = new Map<string, string>();
-      for (const entry of pngEntries) {
-        const sha = path.basename(entry.entryName, '.png');
-        const outPath = path.join(extractDir, `${sha}.png`);
-        fs.writeFileSync(outPath, entry.getData());
-        shaToPath.set(sha, outPath);
-      }
-
-      // For each action, find the screencast frame closest AFTER the action ended
-      const usedFrameIndices = new Set<number>();
-
-      for (const action of userActions) {
-        let bestIdx = -1;
-        let bestDelta = Infinity;
-
-        for (let i = 0; i < frames.length; i++) {
-          if (usedFrameIndices.has(i)) continue;
-          const delta = frames[i].timestamp - action.endTime;
-          if (delta >= 0 && delta < bestDelta) {
-            bestDelta = delta;
-            bestIdx = i;
-          }
-        }
-
-        // If no frame after, take the closest frame before
-        if (bestIdx === -1) {
-          for (let i = frames.length - 1; i >= 0; i--) {
-            if (usedFrameIndices.has(i)) continue;
-            if (frames[i].timestamp <= action.endTime) {
-              bestIdx = i;
-              break;
-            }
-          }
-        }
-
-        if (bestIdx >= 0) {
-          const frame = frames[bestIdx];
-          const screenshotPath = shaToPath.get(frame.sha1);
-          if (screenshotPath) {
-            usedFrameIndices.add(bestIdx);
-            steps.push({
-              stepIndex: steps.length,
-              stepName: action.apiName,
-              screenshotPath,
-              consoleMessages: [],
-              networkErrors: [],
-            });
-          }
-        }
-      }
-
-      core.info(`  Extracted ${steps.length} step screenshots from trace`);
-    } catch (error) {
-      core.warning(`Failed to extract trace screenshots: ${error}`);
-    }
-
-    return steps;
   }
 
   private extractAttachments(result: any): StepCapture[] {
     const steps: StepCapture[] = [];
     if (!result?.attachments) return steps;
 
+    const BUILTIN_NAMES = new Set(['screenshot', 'trace', 'video']);
+
     for (const attachment of result.attachments) {
-      if (attachment.contentType?.includes('image')) {
-        steps.push({
-          stepIndex: steps.length,
-          stepName: attachment.name,
-          screenshotPath: attachment.path || '',
-          consoleMessages: [],
-          networkErrors: [],
-        });
-      }
+      if (!attachment.contentType?.includes('image')) continue;
+      if (BUILTIN_NAMES.has(attachment.name)) continue;
+
+      steps.push({
+        stepIndex: steps.length,
+        stepName: attachment.name,
+        screenshotPath: attachment.path || '',
+        consoleMessages: [],
+        networkErrors: [],
+      });
     }
     return steps;
   }
 }
-
-
-

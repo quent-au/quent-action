@@ -22,6 +22,7 @@ async function run(): Promise<void> {
     const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
     const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
     const browser = core.getInput('browser') || 'chromium';
+    const debugTests = core.getInput('debug-tests') !== 'false';
 
     // Get GitHub context
     const context = github.context;
@@ -131,6 +132,7 @@ async function run(): Promise<void> {
       runId: context.runId.toString(),
       results,
       testsDir,
+      debugTests,
     });
 
     core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);

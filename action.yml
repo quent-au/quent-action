@@ -39,6 +39,10 @@ inputs:
     description: 'Browser to use for testing (chromium, firefox, webkit)'
     required: false
     default: 'chromium'
+  debug-tests:
+    description: 'When true, upload step screenshots for all tests. When false, only upload for failed tests.'
+    required: false
+    default: 'true'
 
 outputs:
   status:
