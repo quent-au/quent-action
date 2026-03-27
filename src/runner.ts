@@ -363,50 +363,113 @@ export default defineConfig({
       const zip = new AdmZip(traceAttachment.path);
       const entries = zip.getEntries();
 
-      // Parse trace events to get action names
-      const traceEntries = entries.filter(e => e.entryName.endsWith('.trace'));
-      const actions: Array<{ name: string; screenSha?: string }> = [];
+      // Parse trace events from all .trace files
+      const traceFiles = entries.filter(e => e.entryName.endsWith('.trace'));
 
-      for (const traceEntry of traceEntries) {
-        const content = traceEntry.getData().toString('utf-8');
+      // Collect actions (before/after pairs) and screencast frames
+      const beforeEvents = new Map<string, { apiName: string; wallTime: number }>();
+      const actions: Array<{ apiName: string; endTime: number; callId: string }> = [];
+      const frames: Array<{ sha1: string; timestamp: number }> = [];
+
+      for (const traceFile of traceFiles) {
+        const content = traceFile.getData().toString('utf-8');
         for (const line of content.split('\n')) {
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            if (event.type === 'after' && event.afterSnapshot) {
-              const apiName = event.params?.apiName || event.callId || `step-${actions.length}`;
-              actions.push({ name: apiName, screenSha: event.afterSnapshot });
+
+            if (event.type === 'before' && event.callId && event.apiName) {
+              beforeEvents.set(event.callId, {
+                apiName: event.apiName,
+                wallTime: event.wallTime || event.startTime || 0,
+              });
+            }
+
+            if (event.type === 'after' && event.callId) {
+              const before = beforeEvents.get(event.callId);
+              if (before) {
+                actions.push({
+                  apiName: before.apiName,
+                  endTime: event.wallTime || event.endTime || before.wallTime || 0,
+                  callId: event.callId,
+                });
+              }
+            }
+
+            if (event.type === 'screencast-frame' && event.sha1) {
+              frames.push({
+                sha1: event.sha1,
+                timestamp: event.timestamp || 0,
+              });
             }
           } catch { /* skip malformed lines */ }
         }
       }
 
-      // Extract screenshot PNGs from the zip's resources
+      // Filter to only user-facing actions (skip internal ones)
+      const userActions = actions.filter(a =>
+        !a.apiName.startsWith('tracing.') &&
+        !a.apiName.startsWith('browserContext.') &&
+        !a.apiName.startsWith('browser.')
+      );
+
+      core.info(`  Trace: ${userActions.length} actions, ${frames.length} screencast frames`);
+
+      if (userActions.length === 0 || frames.length === 0) return steps;
+
+      // Sort frames by timestamp
+      frames.sort((a, b) => a.timestamp - b.timestamp);
+
+      // Extract PNGs from zip resources
       const extractDir = path.join(resultsDir, `trace-screenshots-${Date.now()}`);
       fs.mkdirSync(extractDir, { recursive: true });
 
-      const resourceEntries = entries.filter(
+      const pngEntries = entries.filter(
         e => e.entryName.startsWith('resources/') && e.entryName.endsWith('.png')
       );
-
-      // Map sha1 → extracted file path
       const shaToPath = new Map<string, string>();
-      for (const entry of resourceEntries) {
+      for (const entry of pngEntries) {
         const sha = path.basename(entry.entryName, '.png');
-        const outPath = path.join(extractDir, entry.entryName.replace('resources/', ''));
+        const outPath = path.join(extractDir, `${sha}.png`);
         fs.writeFileSync(outPath, entry.getData());
         shaToPath.set(sha, outPath);
       }
 
-      // Match actions to their after-screenshots
-      if (actions.length > 0) {
-        for (let i = 0; i < actions.length; i++) {
-          const action = actions[i];
-          const screenshotPath = action.screenSha ? shaToPath.get(action.screenSha) : undefined;
+      // For each action, find the screencast frame closest AFTER the action ended
+      const usedFrameIndices = new Set<number>();
+
+      for (const action of userActions) {
+        let bestIdx = -1;
+        let bestDelta = Infinity;
+
+        for (let i = 0; i < frames.length; i++) {
+          if (usedFrameIndices.has(i)) continue;
+          const delta = frames[i].timestamp - action.endTime;
+          if (delta >= 0 && delta < bestDelta) {
+            bestDelta = delta;
+            bestIdx = i;
+          }
+        }
+
+        // If no frame after, take the closest frame before
+        if (bestIdx === -1) {
+          for (let i = frames.length - 1; i >= 0; i--) {
+            if (usedFrameIndices.has(i)) continue;
+            if (frames[i].timestamp <= action.endTime) {
+              bestIdx = i;
+              break;
+            }
+          }
+        }
+
+        if (bestIdx >= 0) {
+          const frame = frames[bestIdx];
+          const screenshotPath = shaToPath.get(frame.sha1);
           if (screenshotPath) {
+            usedFrameIndices.add(bestIdx);
             steps.push({
               stepIndex: steps.length,
-              stepName: action.name,
+              stepName: action.apiName,
               screenshotPath,
               consoleMessages: [],
               networkErrors: [],
@@ -415,24 +478,7 @@ export default defineConfig({
         }
       }
 
-      // Fallback: if no action mapping worked, use all PNGs in order
-      if (steps.length === 0 && resourceEntries.length > 0) {
-        for (const entry of resourceEntries) {
-          const sha = path.basename(entry.entryName, '.png');
-          const p = shaToPath.get(sha);
-          if (p) {
-            steps.push({
-              stepIndex: steps.length,
-              stepName: `Step ${steps.length + 1}`,
-              screenshotPath: p,
-              consoleMessages: [],
-              networkErrors: [],
-            });
-          }
-        }
-      }
-
-      core.info(`  Extracted ${steps.length} screenshots from trace`);
+      core.info(`  Extracted ${steps.length} step screenshots from trace`);
     } catch (error) {
       core.warning(`Failed to extract trace screenshots: ${error}`);
     }
