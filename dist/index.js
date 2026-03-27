@@ -33910,12 +33910,16 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.TestRunner = void 0;
 const core = __importStar(__nccwpck_require__(7484));
 const exec = __importStar(__nccwpck_require__(5236));
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
+const adm_zip_1 = __importDefault(__nccwpck_require__(1316));
 class TestRunner {
     options;
     constructor(options) {
@@ -34052,9 +34056,9 @@ export default defineConfig({
   ],
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
-    trace: 'on-first-retry',
+    trace: 'on',
     screenshot: 'on',
-    video: 'on-first-retry',
+    video: 'off',
   },
   outputDir: '${resultsDir}',
   projects: [
@@ -34137,7 +34141,6 @@ export default defineConfig({
                 core.warning(`Failed to parse quent-report.json: ${error}`);
             }
         }
-        await this.collectScreenshots(resultsDir, tests);
         return {
             status: failed > 0 ? 'failed' : 'passed',
             passed,
@@ -34154,7 +34157,11 @@ export default defineConfig({
                 const testId = spec.id || spec.title;
                 const testName = `${suite.title} > ${spec.title}`;
                 const duration = lastResult?.duration || 0;
-                const steps = this.extractAttachments(lastResult);
+                let steps = this.extractTraceScreenshots(lastResult, resultsDir);
+                if (steps.length === 0) {
+                    steps = this.extractAttachments(lastResult);
+                }
+                core.info(`  Parsed "${testName}": ${test.status}, ${steps.length} step(s)`);
                 if (test.status === 'expected') {
                     tests.push({ testId, testName, status: 'passed', duration, steps });
                 }
@@ -34179,6 +34186,85 @@ export default defineConfig({
             await this.parseSuite(nestedSuite, tests, failures, resultsDir);
         }
     }
+    extractTraceScreenshots(result, resultsDir) {
+        const steps = [];
+        if (!result?.attachments)
+            return steps;
+        const traceAttachment = result.attachments.find((a) => a.name === 'trace' && a.path);
+        if (!traceAttachment?.path || !fs.existsSync(traceAttachment.path))
+            return steps;
+        try {
+            const zip = new adm_zip_1.default(traceAttachment.path);
+            const entries = zip.getEntries();
+            // Parse trace events to get action names
+            const traceEntries = entries.filter(e => e.entryName.endsWith('.trace'));
+            const actions = [];
+            for (const traceEntry of traceEntries) {
+                const content = traceEntry.getData().toString('utf-8');
+                for (const line of content.split('\n')) {
+                    if (!line.trim())
+                        continue;
+                    try {
+                        const event = JSON.parse(line);
+                        if (event.type === 'after' && event.afterSnapshot) {
+                            const apiName = event.params?.apiName || event.callId || `step-${actions.length}`;
+                            actions.push({ name: apiName, screenSha: event.afterSnapshot });
+                        }
+                    }
+                    catch { /* skip malformed lines */ }
+                }
+            }
+            // Extract screenshot PNGs from the zip's resources
+            const extractDir = path.join(resultsDir, `trace-screenshots-${Date.now()}`);
+            fs.mkdirSync(extractDir, { recursive: true });
+            const resourceEntries = entries.filter(e => e.entryName.startsWith('resources/') && e.entryName.endsWith('.png'));
+            // Map sha1 → extracted file path
+            const shaToPath = new Map();
+            for (const entry of resourceEntries) {
+                const sha = path.basename(entry.entryName, '.png');
+                const outPath = path.join(extractDir, entry.entryName.replace('resources/', ''));
+                fs.writeFileSync(outPath, entry.getData());
+                shaToPath.set(sha, outPath);
+            }
+            // Match actions to their after-screenshots
+            if (actions.length > 0) {
+                for (let i = 0; i < actions.length; i++) {
+                    const action = actions[i];
+                    const screenshotPath = action.screenSha ? shaToPath.get(action.screenSha) : undefined;
+                    if (screenshotPath) {
+                        steps.push({
+                            stepIndex: steps.length,
+                            stepName: action.name,
+                            screenshotPath,
+                            consoleMessages: [],
+                            networkErrors: [],
+                        });
+                    }
+                }
+            }
+            // Fallback: if no action mapping worked, use all PNGs in order
+            if (steps.length === 0 && resourceEntries.length > 0) {
+                for (const entry of resourceEntries) {
+                    const sha = path.basename(entry.entryName, '.png');
+                    const p = shaToPath.get(sha);
+                    if (p) {
+                        steps.push({
+                            stepIndex: steps.length,
+                            stepName: `Step ${steps.length + 1}`,
+                            screenshotPath: p,
+                            consoleMessages: [],
+                            networkErrors: [],
+                        });
+                    }
+                }
+            }
+            core.info(`  Extracted ${steps.length} screenshots from trace`);
+        }
+        catch (error) {
+            core.warning(`Failed to extract trace screenshots: ${error}`);
+        }
+        return steps;
+    }
     extractAttachments(result) {
         const steps = [];
         if (!result?.attachments)
@@ -34195,47 +34281,6 @@ export default defineConfig({
             }
         }
         return steps;
-    }
-    async collectScreenshots(resultsDir, tests) {
-        if (!fs.existsSync(resultsDir)) {
-            return;
-        }
-        const walkDir = (dir) => {
-            const files = [];
-            try {
-                const entries = fs.readdirSync(dir, { withFileTypes: true });
-                for (const entry of entries) {
-                    const fullPath = path.join(dir, entry.name);
-                    if (entry.isDirectory()) {
-                        files.push(...walkDir(fullPath));
-                    }
-                    else if (entry.name.endsWith('.png') || entry.name.endsWith('.jpg')) {
-                        files.push(fullPath);
-                    }
-                }
-            }
-            catch { /* ignore */ }
-            return files;
-        };
-        const screenshots = walkDir(resultsDir);
-        for (const test of tests) {
-            if (test.steps.length === 0 && test.status !== 'skipped') {
-                const testScreenshots = screenshots.filter((s) => {
-                    const name = path.basename(s).toLowerCase();
-                    const testName = test.testName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-                    return name.includes(testName) || name.includes(test.testId);
-                });
-                for (let i = 0; i < testScreenshots.length; i++) {
-                    test.steps.push({
-                        stepIndex: i,
-                        stepName: path.basename(testScreenshots[i]),
-                        screenshotPath: testScreenshots[i],
-                        consoleMessages: [],
-                        networkErrors: [],
-                    });
-                }
-            }
-        }
     }
 }
 exports.TestRunner = TestRunner;

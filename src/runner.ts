@@ -2,6 +2,7 @@ import * as core from '@actions/core';
 import * as exec from '@actions/exec';
 import * as fs from 'fs';
 import * as path from 'path';
+import AdmZip from 'adm-zip';
 
 interface RunnerOptions {
   testsDir: string;
@@ -203,9 +204,9 @@ export default defineConfig({
   ],
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
-    trace: 'on-first-retry',
+    trace: 'on',
     screenshot: 'on',
-    video: 'on-first-retry',
+    video: 'off',
   },
   outputDir: '${resultsDir}',
   projects: [
@@ -294,8 +295,6 @@ export default defineConfig({
       }
     }
 
-    await this.collectScreenshots(resultsDir, tests);
-
     return {
       status: failed > 0 ? 'failed' : 'passed',
       passed,
@@ -319,7 +318,12 @@ export default defineConfig({
         const testName = `${suite.title} > ${spec.title}`;
         const duration = lastResult?.duration || 0;
 
-        const steps = this.extractAttachments(lastResult);
+        let steps = this.extractTraceScreenshots(lastResult, resultsDir);
+        if (steps.length === 0) {
+          steps = this.extractAttachments(lastResult);
+        }
+
+        core.info(`  Parsed "${testName}": ${test.status}, ${steps.length} step(s)`);
 
         if (test.status === 'expected') {
           tests.push({ testId, testName, status: 'passed', duration, steps });
@@ -346,6 +350,96 @@ export default defineConfig({
     }
   }
 
+  private extractTraceScreenshots(result: any, resultsDir: string): StepCapture[] {
+    const steps: StepCapture[] = [];
+    if (!result?.attachments) return steps;
+
+    const traceAttachment = result.attachments.find(
+      (a: any) => a.name === 'trace' && a.path
+    );
+    if (!traceAttachment?.path || !fs.existsSync(traceAttachment.path)) return steps;
+
+    try {
+      const zip = new AdmZip(traceAttachment.path);
+      const entries = zip.getEntries();
+
+      // Parse trace events to get action names
+      const traceEntries = entries.filter(e => e.entryName.endsWith('.trace'));
+      const actions: Array<{ name: string; screenSha?: string }> = [];
+
+      for (const traceEntry of traceEntries) {
+        const content = traceEntry.getData().toString('utf-8');
+        for (const line of content.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === 'after' && event.afterSnapshot) {
+              const apiName = event.params?.apiName || event.callId || `step-${actions.length}`;
+              actions.push({ name: apiName, screenSha: event.afterSnapshot });
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      }
+
+      // Extract screenshot PNGs from the zip's resources
+      const extractDir = path.join(resultsDir, `trace-screenshots-${Date.now()}`);
+      fs.mkdirSync(extractDir, { recursive: true });
+
+      const resourceEntries = entries.filter(
+        e => e.entryName.startsWith('resources/') && e.entryName.endsWith('.png')
+      );
+
+      // Map sha1 → extracted file path
+      const shaToPath = new Map<string, string>();
+      for (const entry of resourceEntries) {
+        const sha = path.basename(entry.entryName, '.png');
+        const outPath = path.join(extractDir, entry.entryName.replace('resources/', ''));
+        fs.writeFileSync(outPath, entry.getData());
+        shaToPath.set(sha, outPath);
+      }
+
+      // Match actions to their after-screenshots
+      if (actions.length > 0) {
+        for (let i = 0; i < actions.length; i++) {
+          const action = actions[i];
+          const screenshotPath = action.screenSha ? shaToPath.get(action.screenSha) : undefined;
+          if (screenshotPath) {
+            steps.push({
+              stepIndex: steps.length,
+              stepName: action.name,
+              screenshotPath,
+              consoleMessages: [],
+              networkErrors: [],
+            });
+          }
+        }
+      }
+
+      // Fallback: if no action mapping worked, use all PNGs in order
+      if (steps.length === 0 && resourceEntries.length > 0) {
+        for (const entry of resourceEntries) {
+          const sha = path.basename(entry.entryName, '.png');
+          const p = shaToPath.get(sha);
+          if (p) {
+            steps.push({
+              stepIndex: steps.length,
+              stepName: `Step ${steps.length + 1}`,
+              screenshotPath: p,
+              consoleMessages: [],
+              networkErrors: [],
+            });
+          }
+        }
+      }
+
+      core.info(`  Extracted ${steps.length} screenshots from trace`);
+    } catch (error) {
+      core.warning(`Failed to extract trace screenshots: ${error}`);
+    }
+
+    return steps;
+  }
+
   private extractAttachments(result: any): StepCapture[] {
     const steps: StepCapture[] = [];
     if (!result?.attachments) return steps;
@@ -362,53 +456,6 @@ export default defineConfig({
       }
     }
     return steps;
-  }
-
-  private async collectScreenshots(
-    resultsDir: string,
-    tests: TestInfo[]
-  ): Promise<void> {
-    if (!fs.existsSync(resultsDir)) {
-      return;
-    }
-
-    const walkDir = (dir: string): string[] => {
-      const files: string[] = [];
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          const fullPath = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            files.push(...walkDir(fullPath));
-          } else if (entry.name.endsWith('.png') || entry.name.endsWith('.jpg')) {
-            files.push(fullPath);
-          }
-        }
-      } catch { /* ignore */ }
-      return files;
-    };
-
-    const screenshots = walkDir(resultsDir);
-
-    for (const test of tests) {
-      if (test.steps.length === 0 && test.status !== 'skipped') {
-        const testScreenshots = screenshots.filter((s) => {
-          const name = path.basename(s).toLowerCase();
-          const testName = test.testName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-          return name.includes(testName) || name.includes(test.testId);
-        });
-
-        for (let i = 0; i < testScreenshots.length; i++) {
-          test.steps.push({
-            stepIndex: i,
-            stepName: path.basename(testScreenshots[i]),
-            screenshotPath: testScreenshots[i],
-            consoleMessages: [],
-            networkErrors: [],
-          });
-        }
-      }
-    }
   }
 }
 
