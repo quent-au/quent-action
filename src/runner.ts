@@ -385,37 +385,55 @@ export default defineConfig({
       // Parse trace events from all .trace files
       const traceFiles = entries.filter(e => e.entryName.endsWith('.trace'));
 
-      // Collect actions (before/after pairs) and screencast frames
-      const beforeEvents = new Map<string, { apiName: string; wallTime: number }>();
-      const actions: Array<{ apiName: string; endTime: number; callId: string }> = [];
+      const actions: Array<{ apiName: string; endTime: number }> = [];
       const frames: Array<{ sha1: string; timestamp: number }> = [];
+      const eventTypeCounts = new Map<string, number>();
+      let sampleEvent: string | null = null;
+
+      // First pass: understand the trace format
+      const beforeEvents = new Map<string, { apiName: string; wallTime: number }>();
 
       for (const traceFile of traceFiles) {
+        core.info(`  [trace] Parsing file: ${traceFile.entryName} (${traceFile.header.size} bytes)`);
         const content = traceFile.getData().toString('utf-8');
         for (const line of content.split('\n')) {
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
+            const t = event.type || 'unknown';
+            eventTypeCounts.set(t, (eventTypeCounts.get(t) || 0) + 1);
 
-            if (event.type === 'before' && event.callId && event.apiName) {
+            // Log first non-screencast event for format discovery
+            if (!sampleEvent && t !== 'screencast-frame' && t !== 'context-options' && t !== 'resource-snapshot') {
+              sampleEvent = JSON.stringify(event).substring(0, 500);
+            }
+
+            // Handle before/after pattern
+            if (t === 'before' && event.callId && event.apiName) {
               beforeEvents.set(event.callId, {
                 apiName: event.apiName,
                 wallTime: event.wallTime || event.startTime || 0,
               });
             }
-
-            if (event.type === 'after' && event.callId) {
+            if (t === 'after' && event.callId) {
               const before = beforeEvents.get(event.callId);
               if (before) {
                 actions.push({
                   apiName: before.apiName,
                   endTime: event.wallTime || event.endTime || before.wallTime || 0,
-                  callId: event.callId,
                 });
               }
             }
 
-            if (event.type === 'screencast-frame' && event.sha1) {
+            // Handle single "action" event pattern (some Playwright versions)
+            if (t === 'action' && event.apiName) {
+              actions.push({
+                apiName: event.apiName,
+                endTime: event.wallTime || event.endTime || event.startTime || 0,
+              });
+            }
+
+            if (t === 'screencast-frame' && event.sha1) {
               frames.push({
                 sha1: event.sha1,
                 timestamp: event.timestamp || 0,
@@ -423,6 +441,13 @@ export default defineConfig({
             }
           } catch { /* skip malformed lines */ }
         }
+      }
+
+      // Log trace format diagnostics
+      const typeSummary = Array.from(eventTypeCounts.entries()).map(([k, v]) => `${k}:${v}`).join(', ');
+      core.info(`  [trace] Event types: ${typeSummary}`);
+      if (sampleEvent) {
+        core.info(`  [trace] Sample event: ${sampleEvent}`);
       }
 
       // Filter to only user-facing actions (skip internal ones)
