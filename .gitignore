@@ -3,6 +3,7 @@ node_modules/
 
 # Build outputs (keep dist/ for the action)
 # dist/
+dist/*.map
 
 # IDE
 .idea/
