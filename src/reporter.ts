@@ -84,8 +84,13 @@ export class FailureReporter {
 
     core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
 
+    const totalSteps = results.tests.reduce((sum, t) => sum + t.steps.length, 0);
+    core.info(`Total steps across all tests: ${totalSteps}`);
+
     // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
+    core.info('Phase 1: Uploading test metadata...');
     const testsMetadata = this.prepareTestMetadata(results);
+    core.info(`Prepared metadata for ${testsMetadata.length} tests (${testsMetadata.reduce((s, t) => s + t.steps.length, 0)} steps)`);
 
     const response = await this.api.uploadTestRun({
       projectId,
@@ -98,51 +103,71 @@ export class FailureReporter {
       tests: testsMetadata,
     });
 
+    core.info(`Test run created: ${response.testRunId}`);
+    core.info(`Received ${response.testResults.length} test result(s) with step IDs`);
+
     // Phase 2: Upload screenshots one-by-one using the returned step IDs
+    core.info('Phase 2: Uploading screenshots...');
     const stepIdMap = new Map<string, string>();
     for (const tr of response.testResults) {
+      core.info(`  ${tr.testName}: ${tr.steps.length} step(s)`);
       for (const step of tr.steps) {
         if (step.id) {
           stepIdMap.set(`${tr.testName}::${step.stepIndex}`, step.id);
         }
       }
     }
+    core.info(`Step ID map has ${stepIdMap.size} entries`);
 
     let uploadedCount = 0;
+    let skippedCount = 0;
     let totalScreenshots = 0;
 
     for (const test of results.tests) {
       for (const step of test.steps) {
-        if (!step.screenshotPath || !fs.existsSync(step.screenshotPath)) continue;
+        if (!step.screenshotPath) {
+          core.info(`  [skip] ${test.testName} step ${step.stepIndex}: no screenshot path`);
+          skippedCount++;
+          continue;
+        }
+        if (!fs.existsSync(step.screenshotPath)) {
+          core.warning(`  [skip] ${test.testName} step ${step.stepIndex}: file not found at ${step.screenshotPath}`);
+          skippedCount++;
+          continue;
+        }
         totalScreenshots++;
 
         const stepId = stepIdMap.get(`${test.testName}::${step.stepIndex}`);
         if (!stepId) {
-          core.warning(`No step ID found for ${test.testName} step ${step.stepIndex}, skipping screenshot`);
+          core.warning(`  [skip] No step ID for "${test.testName}::${step.stepIndex}"`);
           continue;
         }
 
         try {
           const buffer = fs.readFileSync(step.screenshotPath);
-          const base64 = buffer.toString('base64');
+          const sizeKB = Math.round(buffer.length / 1024);
+          core.info(`  Uploading ${test.testName} step ${step.stepIndex} (${sizeKB} KB)...`);
 
+          const base64 = buffer.toString('base64');
           await this.api.uploadStepScreenshot({
             testRunId: response.testRunId,
             stepId,
             screenshot: base64,
           });
           uploadedCount++;
+          core.info(`  ✓ Uploaded`);
         } catch (error) {
-          core.warning(`Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
+          core.warning(`  ✗ Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
         }
       }
     }
 
-    core.info(`Uploaded ${uploadedCount}/${totalScreenshots} screenshots`);
+    core.info(`Screenshot upload complete: ${uploadedCount} uploaded, ${skippedCount} skipped, ${totalScreenshots} total on disk`);
 
     // If there are failures, also create an analysis for review
     let analysisId: string | undefined;
     if (results.failed > 0) {
+      core.info('Creating failure analysis...');
       const failedTests = testsMetadata.filter(t => t.status === 'failed');
       const analysisResponse = await this.api.uploadFailure({
         projectId,
@@ -158,6 +183,7 @@ export class FailureReporter {
         },
       });
       analysisId = analysisResponse.analysisId;
+      core.info(`Analysis created: ${analysisId}`);
     }
 
     return {

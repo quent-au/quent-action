@@ -58,9 +58,7 @@ export class TestRunner {
     const resultsDir = path.join(testsDir, 'test-results');
 
     const configPath = path.join(testsDir, 'playwright.config.ts');
-    if (!fs.existsSync(configPath)) {
-      await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
-    }
+    await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
 
     const packageJsonPath = path.join(testsDir, 'package.json');
     if (fs.existsSync(packageJsonPath)) {
@@ -130,9 +128,18 @@ export class TestRunner {
       core.warning(`Playwright stderr:\n${stderr.trim()}`);
     }
 
+    core.info(`Contents of results directory (${resultsDir}):`);
+    this.logDirectoryTree(resultsDir, '  ');
+
     const results = await this.parseResults(testsDir, resultsDir);
 
     core.info(`Test results: ${results.passed} passed, ${results.failed} failed (${results.duration}ms)`);
+    for (const t of results.tests) {
+      core.info(`  ${t.testName}: ${t.status} — ${t.steps.length} step(s)`);
+      for (const s of t.steps) {
+        core.info(`    [${s.stepIndex}] ${s.stepName} → ${s.screenshotPath || '(no path)'}`);
+      }
+    }
     
     return results;
   }
@@ -177,11 +184,15 @@ export class TestRunner {
     retries: number,
     resultsDir: string
   ): Promise<void> {
+    const testsDir = path.dirname(configPath);
+    const testDir = this.detectTestDir(testsDir);
+    core.info(`Using testDir: ${testDir}`);
+
     const config = `
 import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
-  testDir: './specs',
+  testDir: '${testDir}',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: ${retries},
@@ -207,6 +218,21 @@ export default defineConfig({
 `;
     fs.writeFileSync(configPath, config);
     core.info(`Created Playwright config at ${configPath}`);
+  }
+
+  private detectTestDir(testsDir: string): string {
+    for (const candidate of ['tests', 'specs', 'e2e', '.']) {
+      const dir = path.join(testsDir, candidate);
+      if (fs.existsSync(dir)) {
+        try {
+          const entries = fs.readdirSync(dir);
+          if (entries.some(e => /\.(spec|test)\.(ts|js|mjs)$/.test(e))) {
+            return `./${candidate}`;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    return '.';
   }
 
   private async parseResults(testsDir: string, resultsDir: string): Promise<RunResults> {

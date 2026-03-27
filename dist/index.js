@@ -33734,8 +33734,12 @@ class FailureReporter {
     async createReport(params) {
         const { projectId, prNumber, branch, repo, sha, runId, results } = params;
         core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed`);
+        const totalSteps = results.tests.reduce((sum, t) => sum + t.steps.length, 0);
+        core.info(`Total steps across all tests: ${totalSteps}`);
         // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
+        core.info('Phase 1: Uploading test metadata...');
         const testsMetadata = this.prepareTestMetadata(results);
+        core.info(`Prepared metadata for ${testsMetadata.length} tests (${testsMetadata.reduce((s, t) => s + t.steps.length, 0)} steps)`);
         const response = await this.api.uploadTestRun({
             projectId,
             prNumber,
@@ -33746,29 +33750,45 @@ class FailureReporter {
             triggerType: 'PR',
             tests: testsMetadata,
         });
+        core.info(`Test run created: ${response.testRunId}`);
+        core.info(`Received ${response.testResults.length} test result(s) with step IDs`);
         // Phase 2: Upload screenshots one-by-one using the returned step IDs
+        core.info('Phase 2: Uploading screenshots...');
         const stepIdMap = new Map();
         for (const tr of response.testResults) {
+            core.info(`  ${tr.testName}: ${tr.steps.length} step(s)`);
             for (const step of tr.steps) {
                 if (step.id) {
                     stepIdMap.set(`${tr.testName}::${step.stepIndex}`, step.id);
                 }
             }
         }
+        core.info(`Step ID map has ${stepIdMap.size} entries`);
         let uploadedCount = 0;
+        let skippedCount = 0;
         let totalScreenshots = 0;
         for (const test of results.tests) {
             for (const step of test.steps) {
-                if (!step.screenshotPath || !fs.existsSync(step.screenshotPath))
+                if (!step.screenshotPath) {
+                    core.info(`  [skip] ${test.testName} step ${step.stepIndex}: no screenshot path`);
+                    skippedCount++;
                     continue;
+                }
+                if (!fs.existsSync(step.screenshotPath)) {
+                    core.warning(`  [skip] ${test.testName} step ${step.stepIndex}: file not found at ${step.screenshotPath}`);
+                    skippedCount++;
+                    continue;
+                }
                 totalScreenshots++;
                 const stepId = stepIdMap.get(`${test.testName}::${step.stepIndex}`);
                 if (!stepId) {
-                    core.warning(`No step ID found for ${test.testName} step ${step.stepIndex}, skipping screenshot`);
+                    core.warning(`  [skip] No step ID for "${test.testName}::${step.stepIndex}"`);
                     continue;
                 }
                 try {
                     const buffer = fs.readFileSync(step.screenshotPath);
+                    const sizeKB = Math.round(buffer.length / 1024);
+                    core.info(`  Uploading ${test.testName} step ${step.stepIndex} (${sizeKB} KB)...`);
                     const base64 = buffer.toString('base64');
                     await this.api.uploadStepScreenshot({
                         testRunId: response.testRunId,
@@ -33776,16 +33796,18 @@ class FailureReporter {
                         screenshot: base64,
                     });
                     uploadedCount++;
+                    core.info(`  ✓ Uploaded`);
                 }
                 catch (error) {
-                    core.warning(`Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
+                    core.warning(`  ✗ Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
                 }
             }
         }
-        core.info(`Uploaded ${uploadedCount}/${totalScreenshots} screenshots`);
+        core.info(`Screenshot upload complete: ${uploadedCount} uploaded, ${skippedCount} skipped, ${totalScreenshots} total on disk`);
         // If there are failures, also create an analysis for review
         let analysisId;
         if (results.failed > 0) {
+            core.info('Creating failure analysis...');
             const failedTests = testsMetadata.filter(t => t.status === 'failed');
             const analysisResponse = await this.api.uploadFailure({
                 projectId,
@@ -33801,6 +33823,7 @@ class FailureReporter {
                 },
             });
             analysisId = analysisResponse.analysisId;
+            core.info(`Analysis created: ${analysisId}`);
         }
         return {
             testRunId: response.testRunId,
@@ -33902,9 +33925,7 @@ class TestRunner {
         const { testsDir, baseUrl, browser, retries } = this.options;
         const resultsDir = path.join(testsDir, 'test-results');
         const configPath = path.join(testsDir, 'playwright.config.ts');
-        if (!fs.existsSync(configPath)) {
-            await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
-        }
+        await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
         const packageJsonPath = path.join(testsDir, 'package.json');
         if (fs.existsSync(packageJsonPath)) {
             core.info('Installing test dependencies...');
@@ -33963,8 +33984,16 @@ class TestRunner {
         if (stderr.trim()) {
             core.warning(`Playwright stderr:\n${stderr.trim()}`);
         }
+        core.info(`Contents of results directory (${resultsDir}):`);
+        this.logDirectoryTree(resultsDir, '  ');
         const results = await this.parseResults(testsDir, resultsDir);
         core.info(`Test results: ${results.passed} passed, ${results.failed} failed (${results.duration}ms)`);
+        for (const t of results.tests) {
+            core.info(`  ${t.testName}: ${t.status} — ${t.steps.length} step(s)`);
+            for (const s of t.steps) {
+                core.info(`    [${s.stepIndex}] ${s.stepName} → ${s.screenshotPath || '(no path)'}`);
+            }
+        }
         return results;
     }
     findTestFiles(dir) {
@@ -34005,11 +34034,14 @@ class TestRunner {
         catch { /* ignore */ }
     }
     async createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir) {
+        const testsDir = path.dirname(configPath);
+        const testDir = this.detectTestDir(testsDir);
+        core.info(`Using testDir: ${testDir}`);
         const config = `
 import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
-  testDir: './specs',
+  testDir: '${testDir}',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: ${retries},
@@ -34035,6 +34067,21 @@ export default defineConfig({
 `;
         fs.writeFileSync(configPath, config);
         core.info(`Created Playwright config at ${configPath}`);
+    }
+    detectTestDir(testsDir) {
+        for (const candidate of ['tests', 'specs', 'e2e', '.']) {
+            const dir = path.join(testsDir, candidate);
+            if (fs.existsSync(dir)) {
+                try {
+                    const entries = fs.readdirSync(dir);
+                    if (entries.some(e => /\.(spec|test)\.(ts|js|mjs)$/.test(e))) {
+                        return `./${candidate}`;
+                    }
+                }
+                catch { /* ignore */ }
+            }
+        }
+        return '.';
     }
     async parseResults(testsDir, resultsDir) {
         const resultsFile = path.join(resultsDir, 'results.json');

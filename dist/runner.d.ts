@@ -52,6 +52,7 @@ export declare class TestRunner {
     private findTestFiles;
     private logDirectoryTree;
     private createPlaywrightConfig;
+    private detectTestDir;
     private parseResults;
     private parseSuite;
     private extractAttachments;
