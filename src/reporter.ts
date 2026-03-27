@@ -1,5 +1,6 @@
 import * as core from '@actions/core';
 import * as fs from 'fs';
+import * as path from 'path';
 import { QuentiApi } from './api';
 
 interface TestFailure {
@@ -36,7 +37,6 @@ interface RunResults {
   failures: TestFailure[];
 }
 
-// Prepared test result with base64 screenshots (for API)
 interface PreparedTestResult {
   testId: string;
   testName: string;
@@ -50,7 +50,7 @@ interface PreparedTestResult {
 interface PreparedStep {
   stepIndex: number;
   stepName: string;
-  screenshot: string; // base64
+  screenshot: string;
   consoleMessages: Array<{ type: string; text: string; timestamp: number }>;
   networkErrors: Array<{ url: string; status: number; statusText: string; method: string }>;
 }
@@ -64,7 +64,6 @@ interface CreateReportParams {
   runId: string;
   results: RunResults;
   testsDir: string;
-  debugTests: boolean;
 }
 
 interface ReportResult {
@@ -80,101 +79,69 @@ export class FailureReporter {
     this.api = api;
   }
 
+  /**
+   * Test run data is uploaded by `quent-reporter.ts` during Playwright (same as example-sample-ecommerce-tests).
+   * This step only reads `quent-upload-result.json` and optionally creates failure analysis.
+   */
   async createReport(params: CreateReportParams): Promise<ReportResult> {
-    const { projectId, prNumber, branch, repo, sha, runId, results, debugTests } = params;
+    const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
 
-    core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed (debugTests=${debugTests})`);
+    core.info(
+      `Reporting: ${results.passed} passed, ${results.failed} failed (Playwright reporter is the source of test run upload)`
+    );
 
-    const totalSteps = results.tests.reduce((sum, t) => sum + t.steps.length, 0);
-    core.info(`Total steps across all tests: ${totalSteps}`);
+    const reporterResultPath = path.join(testsDir, 'test-results', 'quent-upload-result.json');
+    if (!fs.existsSync(reporterResultPath)) {
+      throw new Error(
+        `Missing ${reporterResultPath}. The Quent Playwright reporter must run and write quent-upload-result.json.`
+      );
+    }
 
-    // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
-    core.info('Phase 1: Uploading test metadata...');
-    const testsMetadata = this.prepareTestMetadata(results);
-    core.info(`Prepared metadata for ${testsMetadata.length} tests (${testsMetadata.reduce((s, t) => s + t.steps.length, 0)} steps)`);
+    let uploaded: { success?: boolean; testRunId?: string; diffUrl?: string; error?: string };
+    try {
+      uploaded = JSON.parse(fs.readFileSync(reporterResultPath, 'utf-8'));
+    } catch (e) {
+      throw new Error(`Invalid quent-upload-result.json: ${e}`);
+    }
 
-    const response = await this.api.uploadTestRun({
+    if (!uploaded.success || !uploaded.testRunId) {
+      throw new Error(
+        `Quent Playwright reporter did not upload successfully: ${uploaded.error || JSON.stringify(uploaded)}`
+      );
+    }
+
+    core.info(`Test run from reporter: ${uploaded.testRunId}`);
+
+    return this.finishAfterReporterUpload({
       projectId,
       prNumber,
       branch,
       repo,
       sha,
       runId,
-      triggerType: 'PR',
-      tests: testsMetadata,
+      results,
+      testRunId: uploaded.testRunId,
+      diffUrl: uploaded.diffUrl || `https://app.quent.ai/test-run/${uploaded.testRunId}`,
     });
+  }
 
-    core.info(`Test run created: ${response.testRunId}`);
-    core.info(`Received ${response.testResults.length} test result(s) with step IDs`);
+  private async finishAfterReporterUpload(args: {
+    projectId: string;
+    prNumber: number;
+    branch: string;
+    repo: string;
+    sha: string;
+    runId: string;
+    results: RunResults;
+    testRunId: string;
+    diffUrl: string;
+  }): Promise<ReportResult> {
+    const { projectId, prNumber, branch, repo, sha, runId, results, testRunId, diffUrl } = args;
 
-    // Phase 2: Upload screenshots one-by-one using the returned step IDs
-    core.info('Phase 2: Uploading screenshots...');
-    const stepIdMap = new Map<string, string>();
-    for (const tr of response.testResults) {
-      core.info(`  ${tr.testName}: ${tr.steps.length} step(s)`);
-      for (const step of tr.steps) {
-        if (step.id) {
-          stepIdMap.set(`${tr.testName}::${step.stepIndex}`, step.id);
-        }
-      }
-    }
-    core.info(`Step ID map has ${stepIdMap.size} entries`);
-
-    let uploadedCount = 0;
-    let skippedCount = 0;
-    let totalScreenshots = 0;
-
-    for (const test of results.tests) {
-      if (!debugTests && (test.status === 'passed' || test.status === 'skipped')) {
-        core.info(`  [skip] ${test.testName}: not uploading screenshots (debugTests=false, status=${test.status})`);
-        skippedCount += test.steps.length;
-        continue;
-      }
-
-      for (const step of test.steps) {
-        if (!step.screenshotPath) {
-          core.info(`  [skip] ${test.testName} step ${step.stepIndex}: no screenshot path`);
-          skippedCount++;
-          continue;
-        }
-        if (!fs.existsSync(step.screenshotPath)) {
-          core.warning(`  [skip] ${test.testName} step ${step.stepIndex}: file not found at ${step.screenshotPath}`);
-          skippedCount++;
-          continue;
-        }
-        totalScreenshots++;
-
-        const stepId = stepIdMap.get(`${test.testName}::${step.stepIndex}`);
-        if (!stepId) {
-          core.warning(`  [skip] No step ID for "${test.testName}::${step.stepIndex}"`);
-          continue;
-        }
-
-        try {
-          const buffer = fs.readFileSync(step.screenshotPath);
-          const sizeKB = Math.round(buffer.length / 1024);
-          core.info(`  Uploading ${test.testName} step ${step.stepIndex} (${sizeKB} KB)...`);
-
-          const base64 = buffer.toString('base64');
-          await this.api.uploadStepScreenshot({
-            testRunId: response.testRunId,
-            stepId,
-            screenshot: base64,
-          });
-          uploadedCount++;
-          core.info(`  ✓ Uploaded`);
-        } catch (error) {
-          core.warning(`  ✗ Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
-        }
-      }
-    }
-
-    core.info(`Screenshot upload complete: ${uploadedCount} uploaded, ${skippedCount} skipped, ${totalScreenshots} total on disk`);
-
-    // If there are failures, also create an analysis for review
     let analysisId: string | undefined;
     if (results.failed > 0) {
       core.info('Creating failure analysis...');
+      const testsMetadata = this.prepareTestMetadata(results);
       const failedTests = testsMetadata.filter(t => t.status === 'failed');
       const analysisResponse = await this.api.uploadFailure({
         projectId,
@@ -194,9 +161,9 @@ export class FailureReporter {
     }
 
     return {
-      testRunId: response.testRunId,
+      testRunId,
       analysisId,
-      diffUrl: response.diffUrl || (analysisId ? `https://app.quent.ai/analysis/${analysisId}` : `https://app.quent.ai/test-run/${response.testRunId}`),
+      diffUrl: analysisId ? `https://app.quent.ai/analysis/${analysisId}` : diffUrl,
     };
   }
 
@@ -239,8 +206,4 @@ export class FailureReporter {
       };
     });
   }
-
 }
-
-
-

@@ -33311,41 +33311,6 @@ class QuentiApi {
         });
         return response.json();
     }
-    async uploadTestRun(params) {
-        core.info(`Uploading test run with ${params.tests.length} tests`);
-        const response = await this.fetch('/v1/test-runs', {
-            method: 'POST',
-            body: JSON.stringify({
-                projectId: params.projectId,
-                prNumber: params.prNumber,
-                branch: params.branch,
-                repo: params.repo,
-                sha: params.sha,
-                triggerType: params.triggerType,
-                tests: params.tests,
-            }),
-        });
-        const data = await response.json();
-        return {
-            testRunId: data.data.id,
-            diffUrl: data.data.deepLink || `https://app.quent.ai/test-run/${data.data.id}`,
-            testResults: (data.data.testResults || []).map(r => ({
-                id: r.id,
-                testName: r.testName,
-                steps: (r.steps || []).map(s => ({
-                    stepIndex: s.stepIndex,
-                    stepName: s.stepName,
-                    id: s.id,
-                })),
-            })),
-        };
-    }
-    async uploadStepScreenshot(params) {
-        await this.fetch(`/v1/test-runs/${params.testRunId}/steps/${params.stepId}/screenshot`, {
-            method: 'PUT',
-            body: JSON.stringify({ screenshot: params.screenshot }),
-        });
-    }
     async waitForDecision(params) {
         const startTime = Date.now();
         const pollInterval = 10000; // 10 seconds
@@ -33525,6 +33490,13 @@ async function run() {
             retries: 1,
             apiKey,
             apiUrl: quentApiUrl,
+            projectId,
+            prNumber: prNumber || 0,
+            branch,
+            repo,
+            sha,
+            runId: context.runId.toString(),
+            debugTests,
         });
         const results = await runner.run();
         core.endGroup();
@@ -33540,7 +33512,6 @@ async function run() {
             runId: context.runId.toString(),
             results,
             testsDir,
-            debugTests,
         });
         core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
         core.info(`🔗 View results: ${report.diffUrl}`);
@@ -33728,93 +33699,52 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.FailureReporter = void 0;
 const core = __importStar(__nccwpck_require__(7484));
 const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
 class FailureReporter {
     api;
     constructor(api) {
         this.api = api;
     }
+    /**
+     * Test run data is uploaded by `quent-reporter.ts` during Playwright (same as example-sample-ecommerce-tests).
+     * This step only reads `quent-upload-result.json` and optionally creates failure analysis.
+     */
     async createReport(params) {
-        const { projectId, prNumber, branch, repo, sha, runId, results, debugTests } = params;
-        core.info(`Creating test run report: ${results.passed} passed, ${results.failed} failed (debugTests=${debugTests})`);
-        const totalSteps = results.tests.reduce((sum, t) => sum + t.steps.length, 0);
-        core.info(`Total steps across all tests: ${totalSteps}`);
-        // Phase 1: Upload test metadata (no screenshots) to create the run and get step IDs
-        core.info('Phase 1: Uploading test metadata...');
-        const testsMetadata = this.prepareTestMetadata(results);
-        core.info(`Prepared metadata for ${testsMetadata.length} tests (${testsMetadata.reduce((s, t) => s + t.steps.length, 0)} steps)`);
-        const response = await this.api.uploadTestRun({
+        const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
+        core.info(`Reporting: ${results.passed} passed, ${results.failed} failed (Playwright reporter is the source of test run upload)`);
+        const reporterResultPath = path.join(testsDir, 'test-results', 'quent-upload-result.json');
+        if (!fs.existsSync(reporterResultPath)) {
+            throw new Error(`Missing ${reporterResultPath}. The Quent Playwright reporter must run and write quent-upload-result.json.`);
+        }
+        let uploaded;
+        try {
+            uploaded = JSON.parse(fs.readFileSync(reporterResultPath, 'utf-8'));
+        }
+        catch (e) {
+            throw new Error(`Invalid quent-upload-result.json: ${e}`);
+        }
+        if (!uploaded.success || !uploaded.testRunId) {
+            throw new Error(`Quent Playwright reporter did not upload successfully: ${uploaded.error || JSON.stringify(uploaded)}`);
+        }
+        core.info(`Test run from reporter: ${uploaded.testRunId}`);
+        return this.finishAfterReporterUpload({
             projectId,
             prNumber,
             branch,
             repo,
             sha,
             runId,
-            triggerType: 'PR',
-            tests: testsMetadata,
+            results,
+            testRunId: uploaded.testRunId,
+            diffUrl: uploaded.diffUrl || `https://app.quent.ai/test-run/${uploaded.testRunId}`,
         });
-        core.info(`Test run created: ${response.testRunId}`);
-        core.info(`Received ${response.testResults.length} test result(s) with step IDs`);
-        // Phase 2: Upload screenshots one-by-one using the returned step IDs
-        core.info('Phase 2: Uploading screenshots...');
-        const stepIdMap = new Map();
-        for (const tr of response.testResults) {
-            core.info(`  ${tr.testName}: ${tr.steps.length} step(s)`);
-            for (const step of tr.steps) {
-                if (step.id) {
-                    stepIdMap.set(`${tr.testName}::${step.stepIndex}`, step.id);
-                }
-            }
-        }
-        core.info(`Step ID map has ${stepIdMap.size} entries`);
-        let uploadedCount = 0;
-        let skippedCount = 0;
-        let totalScreenshots = 0;
-        for (const test of results.tests) {
-            if (!debugTests && (test.status === 'passed' || test.status === 'skipped')) {
-                core.info(`  [skip] ${test.testName}: not uploading screenshots (debugTests=false, status=${test.status})`);
-                skippedCount += test.steps.length;
-                continue;
-            }
-            for (const step of test.steps) {
-                if (!step.screenshotPath) {
-                    core.info(`  [skip] ${test.testName} step ${step.stepIndex}: no screenshot path`);
-                    skippedCount++;
-                    continue;
-                }
-                if (!fs.existsSync(step.screenshotPath)) {
-                    core.warning(`  [skip] ${test.testName} step ${step.stepIndex}: file not found at ${step.screenshotPath}`);
-                    skippedCount++;
-                    continue;
-                }
-                totalScreenshots++;
-                const stepId = stepIdMap.get(`${test.testName}::${step.stepIndex}`);
-                if (!stepId) {
-                    core.warning(`  [skip] No step ID for "${test.testName}::${step.stepIndex}"`);
-                    continue;
-                }
-                try {
-                    const buffer = fs.readFileSync(step.screenshotPath);
-                    const sizeKB = Math.round(buffer.length / 1024);
-                    core.info(`  Uploading ${test.testName} step ${step.stepIndex} (${sizeKB} KB)...`);
-                    const base64 = buffer.toString('base64');
-                    await this.api.uploadStepScreenshot({
-                        testRunId: response.testRunId,
-                        stepId,
-                        screenshot: base64,
-                    });
-                    uploadedCount++;
-                    core.info(`  ✓ Uploaded`);
-                }
-                catch (error) {
-                    core.warning(`  ✗ Failed to upload screenshot for ${test.testName} step ${step.stepIndex}: ${error}`);
-                }
-            }
-        }
-        core.info(`Screenshot upload complete: ${uploadedCount} uploaded, ${skippedCount} skipped, ${totalScreenshots} total on disk`);
-        // If there are failures, also create an analysis for review
+    }
+    async finishAfterReporterUpload(args) {
+        const { projectId, prNumber, branch, repo, sha, runId, results, testRunId, diffUrl } = args;
         let analysisId;
         if (results.failed > 0) {
             core.info('Creating failure analysis...');
+            const testsMetadata = this.prepareTestMetadata(results);
             const failedTests = testsMetadata.filter(t => t.status === 'failed');
             const analysisResponse = await this.api.uploadFailure({
                 projectId,
@@ -33833,9 +33763,9 @@ class FailureReporter {
             core.info(`Analysis created: ${analysisId}`);
         }
         return {
-            testRunId: response.testRunId,
+            testRunId,
             analysisId,
-            diffUrl: response.diffUrl || (analysisId ? `https://app.quent.ai/analysis/${analysisId}` : `https://app.quent.ai/test-run/${response.testRunId}`),
+            diffUrl: analysisId ? `https://app.quent.ai/analysis/${analysisId}` : diffUrl,
         };
     }
     prepareTestMetadata(results) {
@@ -33931,6 +33861,7 @@ class TestRunner {
     async run() {
         const { testsDir, baseUrl, browser, retries } = this.options;
         const resultsDir = path.join(testsDir, 'test-results');
+        this.copyQuentReporter(testsDir);
         const configPath = path.join(testsDir, 'playwright.config.ts');
         await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
         const packageJsonPath = path.join(testsDir, 'package.json');
@@ -33958,10 +33889,10 @@ class TestRunner {
         const resultsJsonPath = path.join(resultsDir, 'results.json');
         core.info(`Starting Playwright (browser=${browser}, baseUrl=${baseUrl})...`);
         try {
+            const o = this.options;
             exitCode = await exec.exec('npx', [
                 'playwright',
                 'test',
-                '--reporter=line,json',
                 `--output=${resultsDir}`,
             ], {
                 cwd: testsDir,
@@ -33970,6 +33901,16 @@ class TestRunner {
                     BASE_URL: baseUrl,
                     QUENT_API_KEY: this.options.apiKey,
                     QUENT_API_URL: this.options.apiUrl || 'https://quent-service.vercel.app',
+                    QUENT_PROJECT_ID: o.projectId,
+                    QUENT_PR_NUMBER: String(o.prNumber),
+                    QUENT_BRANCH: o.branch,
+                    QUENT_REPO: o.repo,
+                    QUENT_SHA: o.sha,
+                    QUENT_RUN_ID: o.runId,
+                    QUENT_TRIGGER_TYPE: 'PR',
+                    QUENT_PLATFORM: 'web',
+                    QUENT_DEBUG_TESTS: o.debugTests ? 'true' : 'false',
+                    QUENT_TEST_RESULTS_DIR: resultsDir,
                     PWTEST_SKIP_TEST_OUTPUT: '1',
                     PLAYWRIGHT_JSON_OUTPUT_NAME: resultsJsonPath,
                 },
@@ -34040,6 +33981,17 @@ class TestRunner {
         }
         catch { /* ignore */ }
     }
+    /** Ship Playwright reporter that reads attachment path/body and POSTs to Quent (same idea as example-sample-ecommerce-tests). */
+    copyQuentReporter(testsDir) {
+        const src = path.join(__dirname, 'quent-reporter.ts');
+        if (!fs.existsSync(src)) {
+            core.warning(`Quent reporter not found at ${src} — rebuild action with cp quent-reporter.ts to dist`);
+            return;
+        }
+        const dest = path.join(testsDir, 'quent-reporter.ts');
+        fs.copyFileSync(src, dest);
+        core.info(`Copied Quent Playwright reporter to ${dest}`);
+    }
     async createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir) {
         const testsDir = path.dirname(configPath);
         const testDir = this.detectTestDir(testsDir);
@@ -34054,8 +34006,10 @@ export default defineConfig({
   retries: ${retries},
   workers: 1,
   reporter: [
+    ['line'],
     ['html', { outputFolder: '${resultsDir}/html-report' }],
     ['json', { outputFile: '${resultsDir}/results.json' }],
+    ['./quent-reporter.ts'],
   ],
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
@@ -34092,7 +34046,6 @@ export default defineConfig({
     }
     async parseResults(testsDir, resultsDir) {
         const resultsFile = path.join(resultsDir, 'results.json');
-        const quentReportFile = path.join(resultsDir, 'quent-report.json');
         let passed = 0;
         let failed = 0;
         let duration = 0;
@@ -34119,31 +34072,6 @@ export default defineConfig({
         else {
             core.warning(`Results file not found at ${resultsFile} — Playwright may not have run any tests`);
         }
-        if (fs.existsSync(quentReportFile)) {
-            try {
-                const rawData = fs.readFileSync(quentReportFile, 'utf-8');
-                const quentData = JSON.parse(rawData);
-                for (const test of quentData.tests || []) {
-                    if (test.status === 'failed' || test.status === 'timedOut') {
-                        failures.push({
-                            testId: test.testId,
-                            testName: test.testName,
-                            error: test.error?.message || 'Unknown error',
-                            stack: test.error?.stack || '',
-                            steps: test.steps || [],
-                            duration: test.duration || 0,
-                        });
-                    }
-                }
-                if (quentData.tests) {
-                    passed = quentData.tests.filter((t) => t.status === 'passed').length;
-                    failed = quentData.tests.filter((t) => t.status !== 'passed').length;
-                }
-            }
-            catch (error) {
-                core.warning(`Failed to parse quent-report.json: ${error}`);
-            }
-        }
         return {
             status: failed > 0 ? 'failed' : 'passed',
             passed,
@@ -34160,12 +34088,6 @@ export default defineConfig({
                 const testId = spec.id || spec.title;
                 const testName = `${suite.title} > ${spec.title}`;
                 const duration = lastResult?.duration || 0;
-                const attachments = lastResult?.attachments || [];
-                core.info(`  "${testName}": ${attachments.length} attachment(s)`);
-                for (const a of attachments) {
-                    const exists = a.path ? fs.existsSync(a.path) : false;
-                    core.info(`    - name="${a.name}" type="${a.contentType}" path="${a.path || '(none)'}" exists=${exists}`);
-                }
                 const steps = this.extractAttachments(lastResult);
                 core.info(`  Parsed "${testName}": ${test.status}, ${steps.length} step(s)`);
                 if (test.status === 'expected') {
@@ -34192,6 +34114,7 @@ export default defineConfig({
             this.parseSuite(nestedSuite, tests, failures);
         }
     }
+    /** Paths from results.json when present (Quent reporter reads live attachment bodies during the run). */
     extractAttachments(result) {
         const steps = [];
         if (!result?.attachments)
@@ -34202,13 +34125,15 @@ export default defineConfig({
                 continue;
             if (BUILTIN_NAMES.has(attachment.name))
                 continue;
-            steps.push({
-                stepIndex: steps.length,
-                stepName: attachment.name,
-                screenshotPath: attachment.path || '',
-                consoleMessages: [],
-                networkErrors: [],
-            });
+            if (attachment.path && fs.existsSync(attachment.path)) {
+                steps.push({
+                    stepIndex: steps.length,
+                    stepName: attachment.name,
+                    screenshotPath: attachment.path,
+                    consoleMessages: [],
+                    networkErrors: [],
+                });
+            }
         }
         return steps;
     }

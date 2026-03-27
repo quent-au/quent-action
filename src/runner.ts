@@ -10,6 +10,13 @@ interface RunnerOptions {
   retries: number;
   apiKey: string;
   apiUrl?: string;
+  projectId: string;
+  prNumber: number;
+  branch: string;
+  repo: string;
+  sha: string;
+  runId: string;
+  debugTests: boolean;
 }
 
 interface TestFailure {
@@ -57,6 +64,8 @@ export class TestRunner {
     const { testsDir, baseUrl, browser, retries } = this.options;
     const resultsDir = path.join(testsDir, 'test-results');
 
+    this.copyQuentReporter(testsDir);
+
     const configPath = path.join(testsDir, 'playwright.config.ts');
     await this.createPlaywrightConfig(configPath, baseUrl, browser, retries, resultsDir);
 
@@ -89,12 +98,12 @@ export class TestRunner {
     core.info(`Starting Playwright (browser=${browser}, baseUrl=${baseUrl})...`);
 
     try {
+      const o = this.options;
       exitCode = await exec.exec(
         'npx',
         [
           'playwright',
           'test',
-          '--reporter=line,json',
           `--output=${resultsDir}`,
         ],
         {
@@ -104,6 +113,16 @@ export class TestRunner {
             BASE_URL: baseUrl,
             QUENT_API_KEY: this.options.apiKey,
             QUENT_API_URL: this.options.apiUrl || 'https://quent-service.vercel.app',
+            QUENT_PROJECT_ID: o.projectId,
+            QUENT_PR_NUMBER: String(o.prNumber),
+            QUENT_BRANCH: o.branch,
+            QUENT_REPO: o.repo,
+            QUENT_SHA: o.sha,
+            QUENT_RUN_ID: o.runId,
+            QUENT_TRIGGER_TYPE: 'PR',
+            QUENT_PLATFORM: 'web',
+            QUENT_DEBUG_TESTS: o.debugTests ? 'true' : 'false',
+            QUENT_TEST_RESULTS_DIR: resultsDir,
             PWTEST_SKIP_TEST_OUTPUT: '1',
             PLAYWRIGHT_JSON_OUTPUT_NAME: resultsJsonPath,
           },
@@ -177,6 +196,20 @@ export class TestRunner {
     } catch { /* ignore */ }
   }
 
+  /** Ship Playwright reporter that reads attachment path/body and POSTs to Quent (same idea as example-sample-ecommerce-tests). */
+  private copyQuentReporter(testsDir: string): void {
+    const src = path.join(__dirname, 'quent-reporter.ts');
+    if (!fs.existsSync(src)) {
+      core.warning(
+        `Quent reporter not found at ${src} — rebuild action with cp quent-reporter.ts to dist`
+      );
+      return;
+    }
+    const dest = path.join(testsDir, 'quent-reporter.ts');
+    fs.copyFileSync(src, dest);
+    core.info(`Copied Quent Playwright reporter to ${dest}`);
+  }
+
   private async createPlaywrightConfig(
     configPath: string,
     baseUrl: string,
@@ -198,8 +231,10 @@ export default defineConfig({
   retries: ${retries},
   workers: 1,
   reporter: [
+    ['line'],
     ['html', { outputFolder: '${resultsDir}/html-report' }],
     ['json', { outputFile: '${resultsDir}/results.json' }],
+    ['./quent-reporter.ts'],
   ],
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
@@ -237,8 +272,7 @@ export default defineConfig({
 
   private async parseResults(testsDir: string, resultsDir: string): Promise<RunResults> {
     const resultsFile = path.join(resultsDir, 'results.json');
-    const quentReportFile = path.join(resultsDir, 'quent-report.json');
-    
+
     let passed = 0;
     let failed = 0;
     let duration = 0;
@@ -267,33 +301,6 @@ export default defineConfig({
       core.warning(`Results file not found at ${resultsFile} — Playwright may not have run any tests`);
     }
 
-    if (fs.existsSync(quentReportFile)) {
-      try {
-        const rawData = fs.readFileSync(quentReportFile, 'utf-8');
-        const quentData = JSON.parse(rawData);
-
-        for (const test of quentData.tests || []) {
-          if (test.status === 'failed' || test.status === 'timedOut') {
-            failures.push({
-              testId: test.testId,
-              testName: test.testName,
-              error: test.error?.message || 'Unknown error',
-              stack: test.error?.stack || '',
-              steps: test.steps || [],
-              duration: test.duration || 0,
-            });
-          }
-        }
-
-        if (quentData.tests) {
-          passed = quentData.tests.filter((t: any) => t.status === 'passed').length;
-          failed = quentData.tests.filter((t: any) => t.status !== 'passed').length;
-        }
-      } catch (error) {
-        core.warning(`Failed to parse quent-report.json: ${error}`);
-      }
-    }
-
     return {
       status: failed > 0 ? 'failed' : 'passed',
       passed,
@@ -315,13 +322,6 @@ export default defineConfig({
         const testId = spec.id || spec.title;
         const testName = `${suite.title} > ${spec.title}`;
         const duration = lastResult?.duration || 0;
-
-        const attachments = lastResult?.attachments || [];
-        core.info(`  "${testName}": ${attachments.length} attachment(s)`);
-        for (const a of attachments) {
-          const exists = a.path ? fs.existsSync(a.path) : false;
-          core.info(`    - name="${a.name}" type="${a.contentType}" path="${a.path || '(none)'}" exists=${exists}`);
-        }
 
         const steps = this.extractAttachments(lastResult);
         core.info(`  Parsed "${testName}": ${test.status}, ${steps.length} step(s)`);
@@ -351,6 +351,7 @@ export default defineConfig({
     }
   }
 
+  /** Paths from results.json when present (Quent reporter reads live attachment bodies during the run). */
   private extractAttachments(result: any): StepCapture[] {
     const steps: StepCapture[] = [];
     if (!result?.attachments) return steps;
@@ -361,13 +362,15 @@ export default defineConfig({
       if (!attachment.contentType?.includes('image')) continue;
       if (BUILTIN_NAMES.has(attachment.name)) continue;
 
-      steps.push({
-        stepIndex: steps.length,
-        stepName: attachment.name,
-        screenshotPath: attachment.path || '',
-        consoleMessages: [],
-        networkErrors: [],
-      });
+      if (attachment.path && fs.existsSync(attachment.path)) {
+        steps.push({
+          stepIndex: steps.length,
+          stepName: attachment.name,
+          screenshotPath: attachment.path,
+          consoleMessages: [],
+          networkErrors: [],
+        });
+      }
     }
     return steps;
   }

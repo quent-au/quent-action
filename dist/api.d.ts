@@ -50,15 +50,6 @@ interface UploadFailureResponse {
     analysisId: string;
     diffUrl: string;
 }
-interface TestRunResult {
-    id: string;
-    testName: string;
-    steps: Array<{
-        stepIndex: number;
-        stepName: string;
-        id?: string;
-    }>;
-}
 interface DecisionResponse {
     status: 'pending' | 'decided' | 'timeout';
     decision?: 'bug' | 'new_feature';
@@ -70,35 +61,6 @@ export declare class QuentiApi {
     private fetch;
     downloadTests(params: DownloadTestsParams): Promise<void>;
     uploadFailure(params: UploadFailureParams): Promise<UploadFailureResponse>;
-    uploadTestRun(params: {
-        projectId: string;
-        prNumber?: number;
-        branch: string;
-        repo: string;
-        sha: string;
-        runId: string;
-        triggerType: string;
-        tests: Array<{
-            testId: string;
-            testName: string;
-            status: string;
-            duration: number;
-            error?: {
-                message: string;
-                stack: string;
-            };
-            steps: any[];
-        }>;
-    }): Promise<{
-        testRunId: string;
-        diffUrl: string;
-        testResults: TestRunResult[];
-    }>;
-    uploadStepScreenshot(params: {
-        testRunId: string;
-        stepId: string;
-        screenshot: string;
-    }): Promise<void>;
     waitForDecision(params: {
         analysisId: string;
         timeout: number;

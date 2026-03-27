@@ -4,7 +4,7 @@
   "description": "GitHub Action to run Quent AI-generated Playwright tests",
   "main": "dist/index.js",
   "scripts": {
-    "build": "ncc build src/index.ts -o dist --license licenses.txt",
+    "build": "ncc build src/index.ts -o dist --license licenses.txt && cp src/quent-reporter.ts dist/quent-reporter.ts",
     "build:cleanup": "ncc build src/cleanup.ts -o dist/cleanup-temp && mv dist/cleanup-temp/index.js dist/cleanup.js && rm -rf dist/cleanup-temp",
     "build:all": "npm run build && npm run build:cleanup",
     "lint": "eslint src/**/*.ts",

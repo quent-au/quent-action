@@ -47,7 +47,6 @@ interface CreateReportParams {
     runId: string;
     results: RunResults;
     testsDir: string;
-    debugTests: boolean;
 }
 interface ReportResult {
     analysisId?: string;
@@ -57,7 +56,12 @@ interface ReportResult {
 export declare class FailureReporter {
     private api;
     constructor(api: QuentiApi);
+    /**
+     * Test run data is uploaded by `quent-reporter.ts` during Playwright (same as example-sample-ecommerce-tests).
+     * This step only reads `quent-upload-result.json` and optionally creates failure analysis.
+     */
     createReport(params: CreateReportParams): Promise<ReportResult>;
+    private finishAfterReporterUpload;
     private prepareTestMetadata;
 }
 export {};

@@ -5,6 +5,13 @@ interface RunnerOptions {
     retries: number;
     apiKey: string;
     apiUrl?: string;
+    projectId: string;
+    prNumber: number;
+    branch: string;
+    repo: string;
+    sha: string;
+    runId: string;
+    debugTests: boolean;
 }
 interface TestFailure {
     testId: string;
@@ -51,10 +58,13 @@ export declare class TestRunner {
     run(): Promise<RunResults>;
     private findTestFiles;
     private logDirectoryTree;
+    /** Ship Playwright reporter that reads attachment path/body and POSTs to Quent (same idea as example-sample-ecommerce-tests). */
+    private copyQuentReporter;
     private createPlaywrightConfig;
     private detectTestDir;
     private parseResults;
     private parseSuite;
+    /** Paths from results.json when present (Quent reporter reads live attachment bodies during the run). */
     private extractAttachments;
 }
 export {};

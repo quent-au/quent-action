@@ -40,7 +40,7 @@ inputs:
     required: false
     default: 'chromium'
   debug-tests:
-    description: 'When true, upload step screenshots for all tests. When false, only upload for failed tests.'
+    description: 'When true, upload screenshots for all tests (passed + failed). When false, only upload for failed tests.'
     required: false
     default: 'true'
 

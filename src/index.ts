@@ -114,6 +114,13 @@ async function run(): Promise<void> {
       retries: 1,
       apiKey,
       apiUrl: quentApiUrl,
+      projectId,
+      prNumber: prNumber || 0,
+      branch,
+      repo,
+      sha,
+      runId: context.runId.toString(),
+      debugTests,
     });
 
     const results = await runner.run();
@@ -132,7 +139,6 @@ async function run(): Promise<void> {
       runId: context.runId.toString(),
       results,
       testsDir,
-      debugTests,
     });
 
     core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
