@@ -157,7 +157,7 @@ async function run(): Promise<void> {
           owner: context.repo.owner,
           repo: context.repo.repo,
           issue_number: prNumber,
-          body: createPRComment(results, report.diffUrl, report.analysisId || report.testRunId || '', context.runId.toString()),
+          body: createPRComment(results),
         });
         core.info('✅ PR comment posted');
       } else {
@@ -246,29 +246,20 @@ async function run(): Promise<void> {
   }
 }
 
-function createPRComment(
-  results: { failed: number; passed: number; failures: Array<{ testName: string; error: string }> },
-  diffUrl: string,
-  analysisId: string,
-  runId?: string
-): string {
+function createPRComment(results: {
+  failed: number;
+  passed: number;
+  failures: Array<{ testName: string; error: string }>;
+}): string {
   const failureList = results.failures
     .slice(0, 5) // Show max 5 failures in comment
     .map((f) => `- **${f.testName}**: ${f.error.substring(0, 100)}...`)
     .join('\n');
 
-  const moreFailures = results.failures.length > 5 
-    ? `\n\n*...and ${results.failures.length - 5} more failures*` 
-    : '';
-
-  // Deep links for Electron app (quent:// protocol)
-  const electronAnalysisLink = `quent://analysis/${analysisId}`;
-  const electronRunLink = runId ? `quent://test-run/${runId}` : null;
-
-  // Web links for browser viewing
-  const webAnalysisLink = `https://app.quent.ai/analysis/${analysisId}`;
-  const acceptLink = `${webAnalysisLink}?action=accept`;
-  const rejectLink = `${webAnalysisLink}?action=reject`;
+  const moreFailures =
+    results.failures.length > 5
+      ? `\n\n*...and ${results.failures.length - 5} more failures*`
+      : '';
 
   return `## 🔍 Quent AI Test Results
 
@@ -279,24 +270,7 @@ function createPRComment(
 ### Failed Tests
 ${failureList}${moreFailures}
 
----
-
-### 📸 View Results
-
-| Platform | Link |
-|----------|------|
-| 🌐 Web | [View in Browser](${diffUrl}) |
-| 💻 Desktop App | [Open in Quent App](${electronAnalysisLink}) |
-${electronRunLink ? `| 📊 Full Run Details | [View Test Run](${electronRunLink}) |\n` : ''}
-
-### 🤔 What would you like to do?
-
-| Decision | Action |
-|----------|--------|
-| ✨ **New Feature** | [Update baselines & pass CI](${acceptLink}) |
-| 🐛 **Bug** | [Fail this check](${rejectLink}) |
-
-> 💡 **Tip:** Open in the Quent desktop app for the best experience with side-by-side screenshot comparisons and AI-powered analysis.
+Open the Quent app and filter by your branch to see the results.
 
 ---
 *Powered by [Quent AI](https://quent.ai) - AI-Powered Visual Testing*`;

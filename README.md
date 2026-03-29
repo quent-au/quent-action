@@ -140,13 +140,7 @@ When tests fail, Quent posts a comment to your PR:
 > - **Login Flow > should show error on invalid credentials**: Expected button to be visible...
 > - **Checkout > should calculate total correctly**: Expected $99.99, got $89.99...
 >
-> ### 📸 [View Screenshots & Diff](https://app.quent.ai/analysis/abc123)
->
-> **What would you like to do?**
-> | Action | Link |
-> |--------|------|
-> | ✅ Mark as New Feature | [Update baselines & re-run](#) |
-> | ❌ Confirm as Bug | [Fail this check](#) |
+> Open the Quent app and filter by your branch to see the results.
 
 ## Advanced Usage
 
