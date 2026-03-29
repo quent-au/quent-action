@@ -157,6 +157,20 @@ function collectScreenshotUploads(
   return out;
 }
 
+/**
+ * Playwright calls `onTestEnd` once per attempt when retries are enabled.
+ * The same TestCase has a stable `id` across attempts — we keep only the last result.
+ */
+function stableTestKey(test: any): string {
+  if (test?.id) return String(test.id);
+  const loc = test?.location;
+  const title =
+    typeof test.titlePath === 'function'
+      ? test.titlePath().join(' > ')
+      : String(test.title ?? '');
+  return `${loc?.file ?? ''}:${loc?.line ?? 0}:${title}`;
+}
+
 function writeUploadResult(payload: {
   success: boolean;
   testRunId?: string;
@@ -176,7 +190,10 @@ function writeUploadResult(payload: {
 
 class QuentReporter {
   private config: ReporterConfig;
-  private tests: any[] = [];
+  /** Last attempt wins per Playwright test id (retries overwrite earlier attempts). */
+  private testsByKey = new Map<string, any>();
+  /** First-seen order of test keys for stable output ordering. */
+  private testOrder: string[] = [];
   private startTime: number = Date.now();
 
   constructor(_options: Record<string, unknown>) {
@@ -192,7 +209,8 @@ class QuentReporter {
 
   onBegin(): void {
     this.startTime = Date.now();
-    this.tests = [];
+    this.testsByKey.clear();
+    this.testOrder = [];
     console.log('[Quent Reporter] Starting test run...');
   }
 
@@ -391,7 +409,11 @@ class QuentReporter {
       });
     }
 
-    this.tests.push(testResult);
+    const key = stableTestKey(test);
+    if (!this.testsByKey.has(key)) {
+      this.testOrder.push(key);
+    }
+    this.testsByKey.set(key, testResult);
   }
 
   async onEnd(): Promise<void> {
@@ -403,7 +425,10 @@ class QuentReporter {
     }
 
     const debugTests = cfg.debugTests === 'true';
-    const testsPayloadFull: TestPayload[] = this.tests.map(t => {
+    const testsList = this.testOrder
+      .map(k => this.testsByKey.get(k))
+      .filter((t): t is NonNullable<typeof t> => t != null);
+    const testsPayloadFull: TestPayload[] = testsList.map(t => {
       const status =
         t.status === 'passed'
           ? 'passed'
