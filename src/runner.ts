@@ -111,6 +111,7 @@ export class TestRunner {
           env: {
             ...process.env,
             BASE_URL: baseUrl,
+            QUENT_BASE_URL: baseUrl,
             QUENT_API_KEY: this.options.apiKey,
             QUENT_API_URL: this.options.apiUrl || 'https://quent-service.vercel.app',
             QUENT_PROJECT_ID: o.projectId,

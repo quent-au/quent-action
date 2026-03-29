@@ -17,9 +17,13 @@ interface ReporterConfig {
   sha: string;
   runId: string;
   debugTests: string;
+  /** App under test (CI preview URL, local BASE_URL, etc.) — stored on the test run for desktop verification. */
+  appBaseUrl: string;
 }
 
 function loadConfig(): ReporterConfig {
+  const appBaseUrl =
+    (process.env.QUENT_BASE_URL || process.env.BASE_URL || '').trim();
   return {
     apiUrl: process.env.QUENT_API_URL || 'https://quent-service.vercel.app',
     apiKey: process.env.QUENT_API_KEY || '',
@@ -32,6 +36,7 @@ function loadConfig(): ReporterConfig {
     sha: process.env.QUENT_SHA || '',
     runId: process.env.QUENT_RUN_ID || '',
     debugTests: process.env.QUENT_DEBUG_TESTS === 'true' ? 'true' : 'false',
+    appBaseUrl,
   };
 }
 
@@ -466,6 +471,14 @@ class QuentReporter {
     });
 
     const duration = Date.now() - this.startTime;
+    const metadata: Record<string, unknown> = {
+      githubRunId: cfg.runId,
+      durationMs: duration,
+      source: 'quent-reporter',
+    };
+    if (cfg.appBaseUrl) {
+      metadata.baseUrl = cfg.appBaseUrl;
+    }
     const body: Record<string, unknown> = {
       projectId: cfg.projectId,
       branch: cfg.branch,
@@ -474,11 +487,7 @@ class QuentReporter {
       triggerType: cfg.triggerType as 'PR' | 'MANUAL' | 'SCHEDULED' | 'LOCAL',
       repo: cfg.repo || undefined,
       sha: cfg.sha || undefined,
-      metadata: {
-        githubRunId: cfg.runId,
-        durationMs: duration,
-        source: 'quent-reporter',
-      },
+      metadata,
       tests: stripStepScreenshots(testsPayloadFull),
     };
     truncateErrorStacksInBody(body);
