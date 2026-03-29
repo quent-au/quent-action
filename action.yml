@@ -31,10 +31,6 @@ inputs:
     description: 'Quent API URL (optional, for self-hosted)'
     required: false
     default: 'https://quent-service.vercel.app'
-  decision-timeout:
-    description: 'Timeout in seconds to wait for user decision on failures'
-    required: false
-    default: '3600'
   browser:
     description: 'Browser to use for testing (chromium, firefox, webkit)'
     required: false
@@ -46,9 +42,11 @@ inputs:
 
 outputs:
   status:
-    description: 'Test run status (passed, failed, pending_decision)'
+    description: 'Test run status (passed or failed)'
   report-url:
-    description: 'URL to view the test report'
+    description: 'URL to open the test run in Quent'
+  test-run-id:
+    description: 'Quent test run id'
   failed-tests:
     description: 'Number of failed tests'
   passed-tests:

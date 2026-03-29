@@ -33265,7 +33265,7 @@ class QuentiApi {
     async fetch(endpoint, options = {}) {
         const url = `${this.baseUrl}${endpoint}`;
         const headers = {
-            'Authorization': `Bearer ${this.apiKey}`,
+            Authorization: `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json',
             ...options.headers,
         };
@@ -33289,52 +33289,10 @@ class QuentiApi {
                 prNumber: params.prNumber,
             }),
         });
-        // Handle binary response (zip file)
         const arrayBuffer = await response.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
         fs.writeFileSync(params.outputPath, buffer);
         core.info(`Tests downloaded to ${params.outputPath} (${buffer.length} bytes)`);
-    }
-    async uploadFailure(params) {
-        core.info(`Uploading failure report for analysis`);
-        const response = await this.fetch('/v1/tests/failure-report', {
-            method: 'POST',
-            body: JSON.stringify({
-                projectId: params.projectId,
-                prNumber: params.prNumber,
-                branch: params.branch,
-                repo: params.repo,
-                sha: params.sha,
-                runId: params.runId,
-                report: params.report,
-            }),
-        });
-        return response.json();
-    }
-    async waitForDecision(params) {
-        const startTime = Date.now();
-        const pollInterval = 10000; // 10 seconds
-        while (Date.now() - startTime < params.timeout * 1000) {
-            try {
-                const response = await this.fetch(`/v1/analysis/${params.analysisId}/status`, {
-                    method: 'GET',
-                });
-                const data = await response.json();
-                if (data.status === 'decided') {
-                    return {
-                        status: 'decided',
-                        decision: data.decision,
-                    };
-                }
-                core.info(`Still waiting for decision... (${Math.floor((Date.now() - startTime) / 1000)}s elapsed)`);
-                await sleep(pollInterval);
-            }
-            catch (error) {
-                core.warning(`Error polling for decision: ${error}`);
-                await sleep(pollInterval);
-            }
-        }
-        return { status: 'timeout' };
     }
     async notifyMerge(params) {
         await this.fetch('/v1/tests/merge', {
@@ -33344,9 +33302,6 @@ class QuentiApi {
     }
 }
 exports.QuentiApi = QuentiApi;
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 
 /***/ }),
@@ -33404,7 +33359,6 @@ const runner_1 = __nccwpck_require__(4813);
 const reporter_1 = __nccwpck_require__(5622);
 async function run() {
     try {
-        // Get inputs
         const apiKey = core.getInput('quent-api-key', { required: true });
         const projectId = core.getInput('project-id', { required: true });
         const baseUrl = core.getInput('base-url', { required: true });
@@ -33412,10 +33366,8 @@ async function run() {
         const waitOnUrl = core.getInput('wait-on-url') || baseUrl;
         const waitOnTimeout = parseInt(core.getInput('wait-on-timeout') || '120', 10);
         const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
-        const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
         const browser = core.getInput('browser') || 'chromium';
         const debugTests = core.getInput('debug-tests') === 'true';
-        // Get GitHub context
         const context = github.context;
         const isPullRequest = context.eventName === 'pull_request';
         if (!isPullRequest) {
@@ -33429,12 +33381,9 @@ async function run() {
         core.info(`📦 Project ID: ${projectId}`);
         core.info(`🌿 Branch: ${branch}`);
         core.info(`🔗 Base URL: ${baseUrl}`);
-        // Initialize API client
         const api = new api_1.QuentiApi(quentApiUrl, apiKey);
-        // Create working directory
         const workDir = path.join(process.cwd(), '.quent-tests');
         await io.mkdirP(workDir);
-        // Step 1: Download tests from Quent
         core.startGroup('📥 Downloading tests from Quent');
         const testsZipPath = path.join(workDir, 'tests.zip');
         await api.downloadTests({
@@ -33443,7 +33392,6 @@ async function run() {
             prNumber: prNumber || 0,
             outputPath: testsZipPath,
         });
-        // Extract tests
         const testsDir = path.join(workDir, 'tests');
         await io.mkdirP(testsDir);
         const zip = new adm_zip_1.default(testsZipPath);
@@ -33454,26 +33402,20 @@ async function run() {
             core.info(`  ${entry}`);
         }
         core.endGroup();
-        // Step 2: Install Playwright
         core.startGroup('🎭 Installing Playwright');
         await exec.exec('npx', ['playwright', 'install', '--with-deps', browser], {
             cwd: testsDir,
         });
         core.endGroup();
-        // Step 3: Start application (if start command provided)
         let appProcess = null;
         if (startCommand) {
             core.startGroup('🚀 Starting application');
             core.info(`Running: ${startCommand}`);
-            // Start in background
             const [cmd, ...args] = startCommand.split(' ');
             exec.exec(cmd, args, {
                 cwd: process.cwd(),
                 silent: true,
-            }).catch(() => {
-                // App might exit when tests complete
-            });
-            // Wait for app to be ready
+            }).catch(() => { });
             core.info(`⏳ Waiting for ${waitOnUrl} to be ready (timeout: ${waitOnTimeout}s)`);
             await exec.exec('npx', ['wait-on', waitOnUrl, '-t', `${waitOnTimeout * 1000}`], {
                 cwd: testsDir,
@@ -33481,7 +33423,6 @@ async function run() {
             core.info('✅ Application is ready');
             core.endGroup();
         }
-        // Step 4: Run tests
         core.startGroup('🧪 Running Quent tests');
         const runner = new runner_1.TestRunner({
             testsDir,
@@ -33500,25 +33441,13 @@ async function run() {
         });
         const results = await runner.run();
         core.endGroup();
-        // Step 5: Report ALL results to Quent (pass and fail)
         core.startGroup('📤 Reporting results to Quent');
-        const reporter = new reporter_1.FailureReporter(api);
-        const report = await reporter.createReport({
-            projectId,
-            prNumber: prNumber || 0,
-            branch,
-            repo,
-            sha,
-            runId: context.runId.toString(),
-            results,
-            testsDir,
-        });
-        core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
-        core.info(`🔗 View results: ${report.diffUrl}`);
-        core.setOutput('report-url', report.diffUrl);
-        core.setOutput('test-run-id', report.testRunId);
+        const summary = (0, reporter_1.readQuentUploadResult)({ testsDir });
+        core.info(`📊 Test run: ${summary.testRunId}`);
+        core.info(`🔗 View in Quent: ${summary.testRunUrl}`);
+        core.setOutput('report-url', summary.testRunUrl);
+        core.setOutput('test-run-id', summary.testRunId);
         core.endGroup();
-        // Step 6: Post PR comment (if PR)
         if (prNumber) {
             core.startGroup('💬 Posting PR comment');
             const token = process.env.GITHUB_TOKEN;
@@ -33528,7 +33457,7 @@ async function run() {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     issue_number: prNumber,
-                    body: createPRComment(results),
+                    body: createPRComment(results, summary.testRunUrl),
                 });
                 core.info('✅ PR comment posted');
             }
@@ -33537,7 +33466,6 @@ async function run() {
             }
             core.endGroup();
         }
-        // If all tests passed, we're done (no need to wait for decision)
         if (results.status === 'passed') {
             core.info('✅ All tests passed!');
             core.setOutput('status', 'passed');
@@ -33545,57 +33473,10 @@ async function run() {
             core.setOutput('failed-tests', 0);
             return;
         }
-        // Step 7: Wait for user decision (only if tests failed and we have an analysisId)
-        if (!report.analysisId) {
-            core.warning('No analysis created - skipping decision wait');
-            core.setFailed(`❌ ${results.failed} tests failed`);
-            return;
-        }
-        core.startGroup('⏳ Waiting for user decision');
-        core.info(`Waiting up to ${decisionTimeout} seconds for decision...`);
-        const decision = await api.waitForDecision({
-            analysisId: report.analysisId,
-            timeout: decisionTimeout,
-        });
-        if (decision.status === 'timeout') {
-            core.setFailed('⏰ Timeout waiting for user decision');
-            return;
-        }
-        if (decision.decision === 'bug') {
-            core.setFailed('🐛 Test failures confirmed as bugs');
-            core.setOutput('status', 'failed');
-            return;
-        }
-        if (decision.decision === 'new_feature') {
-            core.info('✨ Failures marked as new feature - baselines updated');
-            core.info('🔄 Tests will be re-run automatically...');
-            // The backend should trigger a re-run, but we can also do it here
-            core.setOutput('status', 'pending_rerun');
-            // Re-download updated tests and run again
-            await api.downloadTests({
-                projectId,
-                branch,
-                prNumber: prNumber || 0,
-                outputPath: testsZipPath,
-            });
-            const newZip = new adm_zip_1.default(testsZipPath);
-            newZip.extractAllTo(testsDir, true);
-            const rerunResults = await runner.run();
-            if (rerunResults.status === 'passed') {
-                core.info('✅ Re-run passed with updated baselines!');
-                core.setOutput('status', 'passed');
-                return;
-            }
-            else {
-                core.setFailed('❌ Re-run failed even after baseline update');
-                core.setOutput('status', 'failed');
-                return;
-            }
-        }
-        core.endGroup();
-        core.setOutput('status', 'passed');
+        core.setOutput('status', 'failed');
         core.setOutput('passed-tests', results.passed);
         core.setOutput('failed-tests', results.failed);
+        core.setFailed(`❌ ${results.failed} test(s) failed. Review details in Quent: ${summary.testRunUrl}`);
     }
     catch (error) {
         if (error instanceof Error) {
@@ -33606,9 +33487,9 @@ async function run() {
         }
     }
 }
-function createPRComment(results) {
+function createPRComment(results, testRunUrl) {
     const failureList = results.failures
-        .slice(0, 5) // Show max 5 failures in comment
+        .slice(0, 5)
         .map((f) => `- **${f.testName}**: ${f.error.substring(0, 100)}...`)
         .join('\n');
     const moreFailures = results.failures.length > 5
@@ -33620,10 +33501,11 @@ function createPRComment(results) {
 - ✅ Passed: **${results.passed}**
 - ❌ Failed: **${results.failed}**
 
+### Open in Quent
+**[View full test run →](${testRunUrl})**
+
 ### Failed Tests
 ${failureList}${moreFailures}
-
-Open the Quent app and filter by your branch to see the results.
 
 ---
 *Powered by [Quent AI](https://quent.ai) - AI-Powered Visual Testing*`;
@@ -33672,115 +33554,39 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FailureReporter = void 0;
+exports.readQuentUploadResult = readQuentUploadResult;
 const core = __importStar(__nccwpck_require__(7484));
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
-class FailureReporter {
-    api;
-    constructor(api) {
-        this.api = api;
+/**
+ * Reads `quent-upload-result.json` written by `quent-reporter.ts` during Playwright.
+ * Test run payload (including screenshots) is uploaded by the reporter only — triage in Quent App.
+ */
+function readQuentUploadResult(params) {
+    const { testsDir } = params;
+    core.info(`Reporting: test run uploaded by Playwright reporter (see ${path.join(testsDir, 'test-results', 'quent-upload-result.json')})`);
+    const reporterResultPath = path.join(testsDir, 'test-results', 'quent-upload-result.json');
+    if (!fs.existsSync(reporterResultPath)) {
+        throw new Error(`Missing ${reporterResultPath}. The Quent Playwright reporter must run and write quent-upload-result.json.`);
     }
-    /**
-     * Test run data is uploaded by `quent-reporter.ts` during Playwright (same as example-sample-ecommerce-tests).
-     * This step only reads `quent-upload-result.json` and optionally creates failure analysis.
-     */
-    async createReport(params) {
-        const { projectId, prNumber, branch, repo, sha, runId, results, testsDir } = params;
-        core.info(`Reporting: ${results.passed} passed, ${results.failed} failed (Playwright reporter is the source of test run upload)`);
-        const reporterResultPath = path.join(testsDir, 'test-results', 'quent-upload-result.json');
-        if (!fs.existsSync(reporterResultPath)) {
-            throw new Error(`Missing ${reporterResultPath}. The Quent Playwright reporter must run and write quent-upload-result.json.`);
-        }
-        let uploaded;
-        try {
-            uploaded = JSON.parse(fs.readFileSync(reporterResultPath, 'utf-8'));
-        }
-        catch (e) {
-            throw new Error(`Invalid quent-upload-result.json: ${e}`);
-        }
-        if (!uploaded.success || !uploaded.testRunId) {
-            throw new Error(`Quent Playwright reporter did not upload successfully: ${uploaded.error || JSON.stringify(uploaded)}`);
-        }
-        core.info(`Test run from reporter: ${uploaded.testRunId}`);
-        return this.finishAfterReporterUpload({
-            projectId,
-            prNumber,
-            branch,
-            repo,
-            sha,
-            runId,
-            results,
-            testRunId: uploaded.testRunId,
-            diffUrl: uploaded.diffUrl || `https://app.quent.ai/test-run/${uploaded.testRunId}`,
-        });
+    let uploaded;
+    try {
+        uploaded = JSON.parse(fs.readFileSync(reporterResultPath, 'utf-8'));
     }
-    async finishAfterReporterUpload(args) {
-        const { projectId, prNumber, branch, repo, sha, runId, results, testRunId, diffUrl } = args;
-        let analysisId;
-        if (results.failed > 0) {
-            core.info('Creating failure analysis...');
-            const testsMetadata = this.prepareTestMetadata(results);
-            const failedTests = testsMetadata.filter(t => t.status === 'failed');
-            const analysisResponse = await this.api.uploadFailure({
-                projectId,
-                prNumber,
-                branch,
-                repo,
-                sha,
-                runId,
-                report: {
-                    status: results.status,
-                    duration: results.duration,
-                    tests: failedTests,
-                },
-            });
-            analysisId = analysisResponse.analysisId;
-            core.info(`Analysis created: ${analysisId}`);
-        }
-        return {
-            testRunId,
-            analysisId,
-            diffUrl: analysisId ? `https://app.quent.ai/analysis/${analysisId}` : diffUrl,
-        };
+    catch (e) {
+        throw new Error(`Invalid quent-upload-result.json: ${e}`);
     }
-    prepareTestMetadata(results) {
-        const failureMap = new Map();
-        for (const f of results.failures) {
-            failureMap.set(f.testId, f);
-        }
-        return results.tests.map((test) => {
-            const failure = failureMap.get(test.testId);
-            const steps = test.steps.map((step) => ({
-                stepIndex: step.stepIndex,
-                stepName: step.stepName,
-                screenshot: '',
-                consoleMessages: step.consoleMessages || [],
-                networkErrors: step.networkErrors || [],
-            }));
-            if (failure) {
-                return {
-                    testId: test.testId,
-                    testName: test.testName,
-                    status: test.status === 'flaky' ? 'flaky' : 'failed',
-                    duration: test.duration,
-                    retryCount: 1,
-                    error: { message: failure.error, stack: failure.stack },
-                    steps,
-                };
-            }
-            return {
-                testId: test.testId,
-                testName: test.testName,
-                status: test.status,
-                duration: test.duration,
-                retryCount: 0,
-                steps,
-            };
-        });
+    if (!uploaded.success || !uploaded.testRunId) {
+        throw new Error(`Quent Playwright reporter did not upload successfully: ${uploaded.error || JSON.stringify(uploaded)}`);
     }
+    const testRunUrl = uploaded.diffUrl || `https://app.quent.ai/test-run/${uploaded.testRunId}`;
+    core.info(`Test run id: ${uploaded.testRunId}`);
+    core.info(`Open in Quent: ${testRunUrl}`);
+    return {
+        testRunId: uploaded.testRunId,
+        testRunUrl,
+    };
 }
-exports.FailureReporter = FailureReporter;
 
 
 /***/ }),

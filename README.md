@@ -1,14 +1,13 @@
 # Quent AI GitHub Action
 
-Run AI-generated Playwright tests on your pull requests with zero configuration. Quent AI automatically detects UI changes and lets you decide if they're bugs or new features.
+Run AI-generated Playwright tests on your pull requests with zero configuration. Results upload to Quent; open the **Quent App** to review failures and screenshots.
 
 ## Features
 
 - 🚀 **Zero Configuration** - Just add the action to your workflow
 - 🔄 **Smart Retries** - Automatic retry on flaky tests
 - 📸 **Visual Diff** - See exactly what changed with screenshot comparisons
-- 🤖 **AI Analysis** - Intelligent analysis of failures with suggested fixes
-- 💬 **PR Comments** - Automatic comments with failure details and action links
+- 💬 **PR Comments** - Summary with a link to the full test run in Quent
 - 🌿 **Branch-aware** - Maintains separate baselines for feature branches
 
 ## Quick Start
@@ -74,15 +73,16 @@ That's it! When you add the `quent` label to a PR, Quent will automatically run 
 | `wait-on-url` | URL to wait for before testing | No | `base-url` |
 | `wait-on-timeout` | Timeout for app startup (seconds) | No | `120` |
 | `quent-api-url` | Quent API URL (for self-hosted) | No | `https://quent-service.vercel.app` |
-| `decision-timeout` | Timeout for user decision (seconds) | No | `3600` |
 | `browser` | Browser to use (chromium/firefox/webkit) | No | `chromium` |
+| `debug-tests` | Upload screenshots for passed tests too (larger payloads) | No | `false` |
 
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
-| `status` | Test run status (`passed`, `failed`, `pending_decision`) |
-| `report-url` | URL to view the test report |
+| `status` | Test run status (`passed` or `failed`) |
+| `report-url` | URL to open the test run in Quent |
+| `test-run-id` | Quent test run id |
 | `passed-tests` | Number of passed tests |
 | `failed-tests` | Number of failed tests |
 
@@ -91,39 +91,21 @@ That's it! When you add the `quent` label to a PR, Quent will automatically run 
 ### Test Execution Flow
 
 ```
-1. PR created/updated with 'quent' label
+1. PR created/updated (e.g. with 'quent' label)
             ↓
-2. Download tests from Quent cloud
+2. Download tests from Quent
             ↓
-3. Start your application
+3. Start your application (optional)
             ↓
-4. Run Playwright tests
+4. Run Playwright tests (Quent reporter uploads the run)
             ↓
       ┌─────┴─────┐
       ↓           ↓
    Passed      Failed
       ↓           ↓
-   ✅ Done    Retry once
+   ✅ Done    Retry once, then upload + PR comment + fail job
                   ↓
-            ┌─────┴─────┐
-            ↓           ↓
-         Passed      Failed
-            ↓           ↓
-         ✅ Done   Upload report
-                        ↓
-                  Post PR comment
-                        ↓
-                  Wait for decision
-                        ↓
-              ┌─────────┴─────────┐
-              ↓                   ↓
-           "Bug"            "New Feature"
-              ↓                   ↓
-           ❌ Fail         Update baseline
-                                  ↓
-                            Re-run tests
-                                  ↓
-                               ✅ Pass
+         Review details in Quent App (link in comment)
 ```
 
 ### PR Comment Example

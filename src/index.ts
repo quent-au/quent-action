@@ -2,17 +2,14 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as exec from '@actions/exec';
 import * as io from '@actions/io';
-import * as tc from '@actions/tool-cache';
 import * as path from 'path';
-import * as fs from 'fs';
 import AdmZip from 'adm-zip';
 import { QuentiApi } from './api';
 import { TestRunner } from './runner';
-import { FailureReporter } from './reporter';
+import { readQuentUploadResult } from './reporter';
 
 async function run(): Promise<void> {
   try {
-    // Get inputs
     const apiKey = core.getInput('quent-api-key', { required: true });
     const projectId = core.getInput('project-id', { required: true });
     const baseUrl = core.getInput('base-url', { required: true });
@@ -20,14 +17,12 @@ async function run(): Promise<void> {
     const waitOnUrl = core.getInput('wait-on-url') || baseUrl;
     const waitOnTimeout = parseInt(core.getInput('wait-on-timeout') || '120', 10);
     const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
-    const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
     const browser = core.getInput('browser') || 'chromium';
     const debugTests = core.getInput('debug-tests') === 'true';
 
-    // Get GitHub context
     const context = github.context;
     const isPullRequest = context.eventName === 'pull_request';
-    
+
     if (!isPullRequest) {
       core.warning('Quent Action is designed to run on pull_request events. Proceeding anyway...');
     }
@@ -42,17 +37,14 @@ async function run(): Promise<void> {
     core.info(`🌿 Branch: ${branch}`);
     core.info(`🔗 Base URL: ${baseUrl}`);
 
-    // Initialize API client
     const api = new QuentiApi(quentApiUrl, apiKey);
 
-    // Create working directory
     const workDir = path.join(process.cwd(), '.quent-tests');
     await io.mkdirP(workDir);
 
-    // Step 1: Download tests from Quent
     core.startGroup('📥 Downloading tests from Quent');
     const testsZipPath = path.join(workDir, 'tests.zip');
-    
+
     await api.downloadTests({
       projectId,
       branch,
@@ -60,10 +52,9 @@ async function run(): Promise<void> {
       outputPath: testsZipPath,
     });
 
-    // Extract tests
     const testsDir = path.join(workDir, 'tests');
     await io.mkdirP(testsDir);
-    
+
     const zip = new AdmZip(testsZipPath);
     zip.extractAllTo(testsDir, true);
 
@@ -74,29 +65,23 @@ async function run(): Promise<void> {
     }
     core.endGroup();
 
-    // Step 2: Install Playwright
     core.startGroup('🎭 Installing Playwright');
     await exec.exec('npx', ['playwright', 'install', '--with-deps', browser], {
       cwd: testsDir,
     });
     core.endGroup();
 
-    // Step 3: Start application (if start command provided)
     let appProcess: exec.ExecOutput | null = null;
     if (startCommand) {
       core.startGroup('🚀 Starting application');
       core.info(`Running: ${startCommand}`);
-      
-      // Start in background
+
       const [cmd, ...args] = startCommand.split(' ');
       exec.exec(cmd, args, {
         cwd: process.cwd(),
         silent: true,
-      }).catch(() => {
-        // App might exit when tests complete
-      });
+      }).catch(() => {});
 
-      // Wait for app to be ready
       core.info(`⏳ Waiting for ${waitOnUrl} to be ready (timeout: ${waitOnTimeout}s)`);
       await exec.exec('npx', ['wait-on', waitOnUrl, '-t', `${waitOnTimeout * 1000}`], {
         cwd: testsDir,
@@ -105,7 +90,6 @@ async function run(): Promise<void> {
       core.endGroup();
     }
 
-    // Step 4: Run tests
     core.startGroup('🧪 Running Quent tests');
     const runner = new TestRunner({
       testsDir,
@@ -126,28 +110,15 @@ async function run(): Promise<void> {
     const results = await runner.run();
     core.endGroup();
 
-    // Step 5: Report ALL results to Quent (pass and fail)
     core.startGroup('📤 Reporting results to Quent');
-    const reporter = new FailureReporter(api);
-    
-    const report = await reporter.createReport({
-      projectId,
-      prNumber: prNumber || 0,
-      branch,
-      repo,
-      sha,
-      runId: context.runId.toString(),
-      results,
-      testsDir,
-    });
+    const summary = readQuentUploadResult({ testsDir });
 
-    core.info(`📊 Test run created: ${report.testRunId || report.analysisId}`);
-    core.info(`🔗 View results: ${report.diffUrl}`);
-    core.setOutput('report-url', report.diffUrl);
-    core.setOutput('test-run-id', report.testRunId);
+    core.info(`📊 Test run: ${summary.testRunId}`);
+    core.info(`🔗 View in Quent: ${summary.testRunUrl}`);
+    core.setOutput('report-url', summary.testRunUrl);
+    core.setOutput('test-run-id', summary.testRunId);
     core.endGroup();
 
-    // Step 6: Post PR comment (if PR)
     if (prNumber) {
       core.startGroup('💬 Posting PR comment');
       const token = process.env.GITHUB_TOKEN;
@@ -157,7 +128,7 @@ async function run(): Promise<void> {
           owner: context.repo.owner,
           repo: context.repo.repo,
           issue_number: prNumber,
-          body: createPRComment(results),
+          body: createPRComment(results, summary.testRunUrl),
         });
         core.info('✅ PR comment posted');
       } else {
@@ -166,7 +137,6 @@ async function run(): Promise<void> {
       core.endGroup();
     }
 
-    // If all tests passed, we're done (no need to wait for decision)
     if (results.status === 'passed') {
       core.info('✅ All tests passed!');
       core.setOutput('status', 'passed');
@@ -175,68 +145,12 @@ async function run(): Promise<void> {
       return;
     }
 
-    // Step 7: Wait for user decision (only if tests failed and we have an analysisId)
-    if (!report.analysisId) {
-      core.warning('No analysis created - skipping decision wait');
-      core.setFailed(`❌ ${results.failed} tests failed`);
-      return;
-    }
-
-    core.startGroup('⏳ Waiting for user decision');
-    core.info(`Waiting up to ${decisionTimeout} seconds for decision...`);
-    
-    const decision = await api.waitForDecision({
-      analysisId: report.analysisId,
-      timeout: decisionTimeout,
-    });
-
-    if (decision.status === 'timeout') {
-      core.setFailed('⏰ Timeout waiting for user decision');
-      return;
-    }
-
-    if (decision.decision === 'bug') {
-      core.setFailed('🐛 Test failures confirmed as bugs');
-      core.setOutput('status', 'failed');
-      return;
-    }
-
-    if (decision.decision === 'new_feature') {
-      core.info('✨ Failures marked as new feature - baselines updated');
-      core.info('🔄 Tests will be re-run automatically...');
-      
-      // The backend should trigger a re-run, but we can also do it here
-      core.setOutput('status', 'pending_rerun');
-      
-      // Re-download updated tests and run again
-      await api.downloadTests({
-        projectId,
-        branch,
-        prNumber: prNumber || 0,
-        outputPath: testsZipPath,
-      });
-
-      const newZip = new AdmZip(testsZipPath);
-      newZip.extractAllTo(testsDir, true);
-
-      const rerunResults = await runner.run();
-      
-      if (rerunResults.status === 'passed') {
-        core.info('✅ Re-run passed with updated baselines!');
-        core.setOutput('status', 'passed');
-        return;
-      } else {
-        core.setFailed('❌ Re-run failed even after baseline update');
-        core.setOutput('status', 'failed');
-        return;
-      }
-    }
-
-    core.endGroup();
-    core.setOutput('status', 'passed');
+    core.setOutput('status', 'failed');
     core.setOutput('passed-tests', results.passed);
     core.setOutput('failed-tests', results.failed);
-
+    core.setFailed(
+      `❌ ${results.failed} test(s) failed. Review details in Quent: ${summary.testRunUrl}`
+    );
   } catch (error) {
     if (error instanceof Error) {
       core.setFailed(`Action failed: ${error.message}`);
@@ -246,13 +160,16 @@ async function run(): Promise<void> {
   }
 }
 
-function createPRComment(results: {
-  failed: number;
-  passed: number;
-  failures: Array<{ testName: string; error: string }>;
-}): string {
+function createPRComment(
+  results: {
+    failed: number;
+    passed: number;
+    failures: Array<{ testName: string; error: string }>;
+  },
+  testRunUrl: string
+): string {
   const failureList = results.failures
-    .slice(0, 5) // Show max 5 failures in comment
+    .slice(0, 5)
     .map((f) => `- **${f.testName}**: ${f.error.substring(0, 100)}...`)
     .join('\n');
 
@@ -267,16 +184,14 @@ function createPRComment(results: {
 - ✅ Passed: **${results.passed}**
 - ❌ Failed: **${results.failed}**
 
+### Open in Quent
+**[View full test run →](${testRunUrl})**
+
 ### Failed Tests
 ${failureList}${moreFailures}
-
-Open the Quent app and filter by your branch to see the results.
 
 ---
 *Powered by [Quent AI](https://quent.ai) - AI-Powered Visual Testing*`;
 }
 
 run();
-
-
-
