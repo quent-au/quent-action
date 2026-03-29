@@ -40,9 +40,9 @@ inputs:
     required: false
     default: 'chromium'
   debug-tests:
-    description: 'When true, upload screenshots for all tests (passed + failed). When false, only upload for failed tests.'
+    description: 'When true, upload screenshots for all tests (passed + failed). When false, only upload for failed tests (smaller CI payloads).'
     required: false
-    default: 'true'
+    default: 'false'
 
 outputs:
   status:

@@ -31,8 +31,130 @@ function loadConfig(): ReporterConfig {
     repo: process.env.QUENT_REPO || '',
     sha: process.env.QUENT_SHA || '',
     runId: process.env.QUENT_RUN_ID || '',
-    debugTests: process.env.QUENT_DEBUG_TESTS !== 'false' ? 'true' : 'false',
+    debugTests: process.env.QUENT_DEBUG_TESTS === 'true' ? 'true' : 'false',
   };
+}
+
+/** Keep initial POST small; screenshots follow via PUT (same pattern as addTest + POST .../screenshots). */
+function truncateErrorStacksInBody(body: Record<string, unknown>): void {
+  const tests = (body.tests as Record<string, unknown>[]) || [];
+  for (const t of tests) {
+    const err = t.error as { stack?: string } | undefined;
+    if (err?.stack && typeof err.stack === 'string' && err.stack.length > 12_000) {
+      err.stack = `${err.stack.slice(0, 12_000)}\n…(truncated)`;
+    }
+    const steps = t.steps as Array<{ error?: { message?: string; stack?: string } }> | undefined;
+    if (!Array.isArray(steps)) continue;
+    for (const s of steps) {
+      const es = s.error?.stack;
+      if (typeof es === 'string' && es.length > 8_000) {
+        s.error = {
+          message: s.error?.message || '',
+          stack: `${es.slice(0, 8_000)}\n…(truncated)`,
+        };
+      }
+    }
+  }
+}
+
+type StepPayload = {
+  stepIndex: number;
+  stepName: string;
+  stepType: string;
+  screenshot?: string;
+  assertionPassed?: boolean;
+  isBaseline?: boolean;
+  error?: { message: string; stack: string };
+};
+
+type TestPayload = {
+  testName: string;
+  testPath?: string;
+  status: string;
+  duration: number;
+  error?: { message: string; stack: string };
+  retryCount: number;
+  featureName?: string;
+  extractedTestName?: string;
+  steps: StepPayload[];
+};
+
+function stripStepScreenshots(tests: TestPayload[]): TestPayload[] {
+  return tests.map(t => ({
+    ...t,
+    steps: t.steps.map(s => {
+      const { screenshot: _omit, ...rest } = s;
+      return rest;
+    }),
+  }));
+}
+
+async function uploadStepScreenshotsChunked(
+  apiUrl: string,
+  apiKey: string,
+  runId: string,
+  items: { stepId: string; screenshot: string }[]
+): Promise<{ ok: number; failed: number }> {
+  const base = apiUrl.replace(/\/$/, '');
+  let ok = 0;
+  let failed = 0;
+  const total = items.length;
+  for (let i = 0; i < items.length; i++) {
+    const { stepId, screenshot } = items[i];
+    if (!screenshot) continue;
+    const putUrl = `${base}/v1/test-runs/${runId}/steps/${stepId}/screenshot`;
+    try {
+      const res = await fetch(putUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ screenshot }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        console.error(
+          `[Quent Reporter] Screenshot PUT ${i + 1}/${total} failed (${res.status}): ${txt.slice(0, 200)}`
+        );
+        failed++;
+      } else {
+        ok++;
+        if (ok % 8 === 0 || i === items.length - 1) {
+          console.log(`[Quent Reporter] Screenshots uploaded: ${ok}/${total}`);
+        }
+      }
+    } catch (e) {
+      console.error(`[Quent Reporter] Screenshot PUT ${stepId} error:`, e);
+      failed++;
+    }
+  }
+  return { ok, failed };
+}
+
+function collectScreenshotUploads(
+  originalTests: TestPayload[],
+  testResults: Array<{ steps?: Array<{ id: string; stepIndex: number }> } | undefined>
+): { stepId: string; screenshot: string }[] {
+  const out: { stepId: string; screenshot: string }[] = [];
+  for (let ti = 0; ti < originalTests.length; ti++) {
+    const orig = originalTests[ti];
+    const resp = testResults[ti];
+    if (!orig?.steps || !resp?.steps?.length) continue;
+    for (const step of orig.steps) {
+      const sc = step.screenshot;
+      if (!sc) continue;
+      const respStep = resp.steps.find(s => s.stepIndex === step.stepIndex);
+      if (respStep?.id) {
+        out.push({ stepId: respStep.id, screenshot: sc });
+      } else {
+        console.warn(
+          `[Quent Reporter] No step id for test "${orig.testName}" stepIndex=${step.stepIndex}; skipping screenshot upload`
+        );
+      }
+    }
+  }
+  return out;
 }
 
 function writeUploadResult(payload: {
@@ -281,7 +403,7 @@ class QuentReporter {
     }
 
     const debugTests = cfg.debugTests === 'true';
-    const testsPayload = this.tests.map(t => {
+    const testsPayloadFull: TestPayload[] = this.tests.map(t => {
       const status =
         t.status === 'passed'
           ? 'passed'
@@ -319,7 +441,7 @@ class QuentReporter {
     });
 
     const duration = Date.now() - this.startTime;
-    const body = {
+    const body: Record<string, unknown> = {
       projectId: cfg.projectId,
       branch: cfg.branch,
       platform: cfg.platform,
@@ -332,11 +454,14 @@ class QuentReporter {
         durationMs: duration,
         source: 'quent-reporter',
       },
-      tests: testsPayload,
+      tests: stripStepScreenshots(testsPayloadFull),
     };
+    truncateErrorStacksInBody(body);
 
     const url = `${cfg.apiUrl.replace(/\/$/, '')}/v1/test-runs`;
-    console.log(`[Quent Reporter] POST ${url} (${testsPayload.length} tests)`);
+    console.log(
+      `[Quent Reporter] POST ${url} (${testsPayloadFull.length} tests, metadata-only; screenshots uploaded in chunks)`
+    );
 
     try {
       const response = await fetch(url, {
@@ -357,16 +482,42 @@ class QuentReporter {
 
       const data = JSON.parse(responseText) as {
         success?: boolean;
-        data?: { id: string; runNumber?: number; deepLink?: string };
+        data?: {
+          id: string;
+          runNumber?: number;
+          deepLink?: string;
+          testResults?: Array<{ steps?: Array<{ id: string; stepIndex: number }> }>;
+        };
       };
 
       if (data.success && data.data?.id) {
+        const runId = data.data.id;
         const diffUrl =
-          data.data.deepLink || `https://app.quent.ai/test-run/${data.data.id}`;
-        console.log(`[Quent Reporter] OK run #${data.data.runNumber} id=${data.data.id}`);
+          data.data.deepLink || `https://app.quent.ai/test-run/${runId}`;
+        console.log(`[Quent Reporter] OK run #${data.data.runNumber} id=${runId}`);
+
+        const toUpload = collectScreenshotUploads(
+          testsPayloadFull,
+          data.data.testResults || []
+        );
+        if (toUpload.length > 0) {
+          console.log(`[Quent Reporter] Uploading ${toUpload.length} screenshot(s) via PUT (chunked)`);
+          const { ok, failed } = await uploadStepScreenshotsChunked(
+            cfg.apiUrl,
+            cfg.apiKey,
+            runId,
+            toUpload
+          );
+          if (failed > 0) {
+            console.warn(`[Quent Reporter] ${failed} screenshot upload(s) failed; run metadata still saved`);
+          } else {
+            console.log(`[Quent Reporter] All ${ok} screenshot(s) uploaded`);
+          }
+        }
+
         writeUploadResult({
           success: true,
-          testRunId: data.data.id,
+          testRunId: runId,
           diffUrl,
         });
       } else {

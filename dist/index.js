@@ -33414,7 +33414,7 @@ async function run() {
         const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
         const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
         const browser = core.getInput('browser') || 'chromium';
-        const debugTests = core.getInput('debug-tests') !== 'false';
+        const debugTests = core.getInput('debug-tests') === 'true';
         // Get GitHub context
         const context = github.context;
         const isPullRequest = context.eventName === 'pull_request';
@@ -33972,6 +33972,9 @@ class TestRunner {
         const testsDir = path.dirname(configPath);
         const testDir = this.detectTestDir(testsDir);
         core.info(`Using testDir: ${testDir}`);
+        // HTML report must NOT live under outputDir (test-results) or Playwright clears artifacts / grows huge uploads.
+        const resultsDirPosix = resultsDir.replace(/\\/g, '/');
+        const htmlReportDir = path.join(testsDir, 'playwright-report').replace(/\\/g, '/');
         const config = `
 import { defineConfig, devices } from '@playwright/test';
 
@@ -33983,8 +33986,8 @@ export default defineConfig({
   workers: 1,
   reporter: [
     ['line'],
-    ['html', { outputFolder: '${resultsDir}/html-report' }],
-    ['json', { outputFile: '${resultsDir}/results.json' }],
+    ['html', { outputFolder: '${htmlReportDir}' }],
+    ['json', { outputFile: '${resultsDirPosix}/results.json' }],
     ['./quent-reporter.ts'],
   ],
   use: {
@@ -33993,7 +33996,7 @@ export default defineConfig({
     screenshot: 'off',
     video: 'off',
   },
-  outputDir: '${resultsDir}',
+  outputDir: '${resultsDirPosix}',
   projects: [
     {
       name: '${browser}',

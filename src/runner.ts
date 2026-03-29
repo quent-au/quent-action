@@ -221,6 +221,10 @@ export class TestRunner {
     const testDir = this.detectTestDir(testsDir);
     core.info(`Using testDir: ${testDir}`);
 
+    // HTML report must NOT live under outputDir (test-results) or Playwright clears artifacts / grows huge uploads.
+    const resultsDirPosix = resultsDir.replace(/\\/g, '/');
+    const htmlReportDir = path.join(testsDir, 'playwright-report').replace(/\\/g, '/');
+
     const config = `
 import { defineConfig, devices } from '@playwright/test';
 
@@ -232,8 +236,8 @@ export default defineConfig({
   workers: 1,
   reporter: [
     ['line'],
-    ['html', { outputFolder: '${resultsDir}/html-report' }],
-    ['json', { outputFile: '${resultsDir}/results.json' }],
+    ['html', { outputFolder: '${htmlReportDir}' }],
+    ['json', { outputFile: '${resultsDirPosix}/results.json' }],
     ['./quent-reporter.ts'],
   ],
   use: {
@@ -242,7 +246,7 @@ export default defineConfig({
     screenshot: 'off',
     video: 'off',
   },
-  outputDir: '${resultsDir}',
+  outputDir: '${resultsDirPosix}',
   projects: [
     {
       name: '${browser}',

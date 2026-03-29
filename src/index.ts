@@ -22,7 +22,7 @@ async function run(): Promise<void> {
     const quentApiUrl = core.getInput('quent-api-url') || 'https://quent-service.vercel.app';
     const decisionTimeout = parseInt(core.getInput('decision-timeout') || '3600', 10);
     const browser = core.getInput('browser') || 'chromium';
-    const debugTests = core.getInput('debug-tests') !== 'false';
+    const debugTests = core.getInput('debug-tests') === 'true';
 
     // Get GitHub context
     const context = github.context;
